@@ -1,55 +1,79 @@
 import { defineBackground } from 'wxt/utils/define-background';
 import { WhitelistManager } from '../src/background/whitelist-manager';
 import { StatsManager } from '../src/background/stats-manager';
-import { DNR_CONFIG, RULESET_METADATA } from '../src/constants';
-import { getEnabledRulesets, setEnabledRulesets } from '../src/storage';
+import { BADGE_CONFIG, RULESET_METADATA } from '../src/constants';
+import { getEnabledRulesets, setEnabledRulesets, incrementBlockStats } from '../src/storage';
 import type { MessageType, TabState } from '../src/shared/types';
 
 export default defineBackground(() => {
   const whitelistManager = WhitelistManager.getInstance();
   const statsManager = StatsManager.getInstance();
 
-  console.log('[BlockAds 2.0] Service Worker khởi động (Manifest V3 Clean Architecture).');
+  console.log('[BlockAds 2.0] Service Worker khởi động (Manifest V3 Production-Ready).');
 
-  // Kích hoạt đồng bộ Dynamic Rules ngay lập tức khi Service Worker thức dậy / reload
-  whitelistManager.syncDynamicRules().catch(console.error);
+  async function initializeExtension() {
+    try {
+      await chrome.action.setBadgeBackgroundColor({ color: BADGE_CONFIG.ALERT_COLOR });
+    } catch {}
 
-  // BUG-01 Fix: Bật cơ chế đếm Badge gốc trên Production nếu trình duyệt hỗ trợ
-  try {
-    if (chrome.declarativeNetRequest?.setExtensionActionOptions) {
-      chrome.declarativeNetRequest.setExtensionActionOptions({
-        displayActionCountAsBadgeText: true
-      });
-    }
-  } catch {
-    // Không hỗ trợ trên một số bản Chromium cũ
+    await whitelistManager.syncDynamicRules().catch(console.error);
+
+    // SỬA BUG 1: Bật tính năng tự động hiển thị số lượng chặn chuẩn Production của Chrome MV3
+    try {
+      if (chrome.declarativeNetRequest?.setExtensionActionOptions) {
+        await chrome.declarativeNetRequest.setExtensionActionOptions({
+          displayActionCountAsBadgeText: true
+        });
+      }
+    } catch {}
   }
 
+  // Khởi tạo ngay khi Service Worker thức dậy
+  initializeExtension().catch(console.error);
 
-  // Khởi tạo và đồng bộ dynamic rules
   chrome.runtime.onInstalled.addListener(async (details) => {
     console.log('[BlockAds 2.0] onInstalled:', details.reason);
-    await whitelistManager.syncDynamicRules();
+    await initializeExtension();
   });
 
   chrome.runtime.onStartup.addListener(async () => {
-    await whitelistManager.syncDynamicRules();
+    await initializeExtension();
   });
 
-  // BUG-01 Fix: Chỉ gắn listener onRuleMatchedDebug khi API tồn tại (Unpacked dev mode)
+  // 1. Chế độ Developer Mode (Unpacked): Cập nhật tức thì qua onRuleMatchedDebug
   if (chrome.declarativeNetRequest?.onRuleMatchedDebug) {
-    chrome.declarativeNetRequest.onRuleMatchedDebug.addListener((info) => {
+    chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(async (info) => {
+      if (info.rule?.rulesetId === '_dynamic') return;
       const tabId = info.request?.tabId;
-      if (info.rule?.rulesetId) {
-        statsManager.recordBlock(tabId);
+      if (tabId && tabId > 0) {
+        await statsManager.recordBlock(tabId);
       }
     });
   }
 
-  // Quản lý vòng đời Tabs
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status === 'loading' && changeInfo.url) {
+  // 2. Chế độ Production Fallback: Đồng bộ qua getMatchedRules khi Tab tải xong
+  chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') {
       statsManager.resetTab(tabId);
+    } else if (
+      changeInfo.status === 'complete' &&
+      !chrome.declarativeNetRequest?.onRuleMatchedDebug &&
+      chrome.declarativeNetRequest?.getMatchedRules
+    ) {
+      try {
+        const matched = await chrome.declarativeNetRequest.getMatchedRules({ tabId });
+        const count = matched?.rulesMatchedInfo?.length || 0;
+        if (count > 0) {
+          const currentCount = await statsManager.getTabBlockedCountAsync(tabId);
+          if (count > currentCount) {
+            const delta = count - currentCount;
+            await statsManager.setTabBlockedCount(tabId, count);
+            await incrementBlockStats(delta);
+          }
+        }
+      } catch {
+        // Tab hệ thống hoặc không có quyền truy cập
+      }
     }
   });
 
@@ -58,7 +82,7 @@ export default defineBackground(() => {
   });
 
   chrome.tabs.onActivated.addListener(async (activeInfo) => {
-    const count = statsManager.getTabBlockedCount(activeInfo.tabId);
+    const count = await statsManager.getTabBlockedCountAsync(activeInfo.tabId);
     await statsManager.updateTabBadge(activeInfo.tabId, count);
   });
 
@@ -86,15 +110,16 @@ export default defineBackground(() => {
           const domain = whitelistManager.normalizeDomain(rawUrl);
           const isWhitelisted = domain ? await whitelistManager.isWhitelisted(domain) : false;
 
-          // BUG-01: Lấy số liệu chính xác từ getMatchedRules khi mở Popup nếu khả dụng
-          let blockedCount = tabId ? statsManager.getTabBlockedCount(tabId) : 0;
+          let blockedCount = tabId ? await statsManager.getTabBlockedCountAsync(tabId) : 0;
           if (tabId && chrome.declarativeNetRequest?.getMatchedRules) {
             try {
               const matched = await chrome.declarativeNetRequest.getMatchedRules({ tabId });
               const matchedTotal = matched.rulesMatchedInfo?.length || 0;
               if (matchedTotal > blockedCount) {
+                const delta = matchedTotal - blockedCount;
                 blockedCount = matchedTotal;
-                await statsManager.updateTabBadge(tabId, blockedCount);
+                await statsManager.setTabBlockedCount(tabId, blockedCount);
+                await incrementBlockStats(delta);
               }
             } catch {
               // Ignored
@@ -144,7 +169,7 @@ export default defineBackground(() => {
 
         case 'GET_RULESETS': {
           const enabledList = await getEnabledRulesets();
-          const rulesets = Object.values(RULESET_METADATA).map(r => ({
+          const rulesets = Object.values(RULESET_METADATA).map((r) => ({
             ...r,
             enabled: enabledList.includes(r.id)
           }));
@@ -163,7 +188,7 @@ export default defineBackground(() => {
               enableRulesetIds: [rulesetId]
             });
           } else {
-            updated = current.filter(id => id !== rulesetId);
+            updated = current.filter((id) => id !== rulesetId);
             await chrome.declarativeNetRequest.updateEnabledRulesets({
               disableRulesetIds: [rulesetId]
             });

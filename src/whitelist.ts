@@ -88,25 +88,26 @@ export function buildMovieAntiAdblockBypassRules(): chrome.declarativeNetRequest
   return rules;
 }
 
+export const ANTI_ADBLOCK_DOMAINS = ANTI_ADBLOCK_MOVIE_DOMAINS;
+export const WHITELIST_RULE_ID_START = DNR_CONFIG.WHITELIST_RULE_ID_START;
+export const BYPASS_ANTI_ADBLOCK_ID_START = ANTI_ADBLOCK_BYPASS_ID_OFFSET;
+export const MANAGED_RULE_ID_MAX = 29999;
+
 export function buildWhitelistDynamicRules(domains: readonly string[]): chrome.declarativeNetRequest.Rule[] {
   return [...buildWhitelistRules(domains), ...buildMovieAntiAdblockBypassRules()];
 }
 
 /**
- * BUG-04 Fix: Đồng bộ nguyên tử (Atomic Sync) danh sách Dynamic Rules vào DeclarativeNetRequest.
- * Luôn xóa toàn bộ ID cũ trong dải Whitelist (10000–19999) & Anti-Adblock Bypass (20000-20999)
- * và nạp rules mới cùng lúc trong 1 giao dịch duy nhất.
+ * BUG-04 & BUG-05 Fix: Đồng bộ nguyên tử (Atomic Sync) danh sách Dynamic Rules vào DeclarativeNetRequest.
+ * Chỉ xóa các ID thuộc dải ID do Whitelist và Anti-adblock quản lý (10000–29999)
+ * và không xóa nhầm các dynamic rules khác.
  */
 export async function syncWhitelistDynamicRules(whitelist: readonly string[]): Promise<void> {
   try {
     const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
 
     const removeRuleIds = existingRules
-      .filter(
-        (r) =>
-          (r.id >= DNR_CONFIG.WHITELIST_RULE_ID_START && r.id <= DNR_CONFIG.WHITELIST_RULE_ID_END) ||
-          (r.id >= ANTI_ADBLOCK_BYPASS_ID_OFFSET && r.id < ANTI_ADBLOCK_BYPASS_ID_OFFSET + 1000)
-      )
+      .filter((r) => r.id >= WHITELIST_RULE_ID_START && r.id <= MANAGED_RULE_ID_MAX)
       .map((r) => r.id);
 
     const userRules = buildWhitelistRules(whitelist);
@@ -130,3 +131,24 @@ export async function syncWhitelistToDynamicRules(): Promise<string[]> {
   await syncWhitelistDynamicRules(list);
   return list;
 }
+
+export async function addDomainToWhitelist(rawDomain: string): Promise<string[]> {
+  const { addToWhitelist } = await import('./storage');
+  const updated = await addToWhitelist(rawDomain);
+  await syncWhitelistDynamicRules(updated);
+  return updated;
+}
+
+export async function removeDomainFromWhitelist(rawDomain: string): Promise<string[]> {
+  const { removeFromWhitelist } = await import('./storage');
+  const updated = await removeFromWhitelist(rawDomain);
+  await syncWhitelistDynamicRules(updated);
+  return updated;
+}
+
+export async function clearWhitelist(): Promise<void> {
+  const { clearWhitelist: storageClear } = await import('./storage');
+  await storageClear();
+  await syncWhitelistDynamicRules([]);
+}
+

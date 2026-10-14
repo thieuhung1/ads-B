@@ -1,95 +1,117 @@
 import { defineContentScript } from 'wxt/utils/define-content-script';
+import { GAMBLING_KEYWORDS, SAFE_EXTERNAL_DOMAINS } from '../src/constants';
+import { getCosmeticStylesheetForDomain } from '../src/cosmetic';
+import { getStorageData, normalizeDomain } from '../src/storage';
 import { CosmeticEngine } from '../src/content/cosmetic-engine';
 import { ElementPicker } from '../src/content/element-picker';
-import { getCosmeticStylesheetForDomain } from '../src/cosmetic';
-import { getWhitelist } from '../src/storage';
-import { extractNormalizedDomain } from '../src/domain';
 
 const STYLE_ELEMENT_ID = 'blockads-cosmetic-style';
 
-// Từ khóa nhận diện link/ảnh cờ bạc
-const GAMBLING_PATTERNS = [
-  'vsbet', 'vivu88', 'rikvip', 'nhatvip', 'win79', 'sunwin', 'sun.win',
-  'go88', 'b52', '789club', 'hitclub', 'kubet', 'f8bet', 'shbet',
-  'hi88', 'new88', 'jun88', 'mb66', 'ok9', '8xbet', '188bet', 'w88',
-  'm88', 'fb88', 'fun88', 'vn88', 'bk8', 'dafabet', 'cmd368', 'tx88',
-  'taixiu', 'nohu', 'nhacai', 'cacuoc', 'casino', 'bet', 'vip'
-];
+// 1. Vô hiệu hóa trình kiểm tra Anti-Adblock trong trang (Giả lập Google Ads luôn tải thành công)
+function injectAntiAdblockDefuser(): void {
+  try {
+    const script = document.createElement('script');
+    script.textContent = `
+      (function() {
+        window.canRunAds = true;
+        window.isAdBlockActive = false;
+        window.google_ad_status = 1;
+        var dummy = { loaded: true, push: function() { return 1; } };
+        try {
+          Object.defineProperty(window, 'adsbygoogle', {
+            get: function() { return dummy; },
+            set: function() {},
+            configurable: true
+          });
+        } catch (e) {
+          window.adsbygoogle = dummy;
+        }
+      })();
+    `;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+  } catch {
+    // Bỏ qua nếu CSP của trang chặn inline script
+  }
+}
 
-/**
- * Ẩn phần tử an toàn (Visual Collapse): Vừa biến mất hoàn toàn trên giao diện,
- * vừa né được lệnh kiểm tra display:none của script Anti-Adblock!
- */
-function stealthHideElement(el: HTMLElement | null): void {
-  if (!el || el.dataset.blockadsHidden === 'true') return;
-  el.dataset.blockadsHidden = 'true';
-  el.style.setProperty('opacity', '0', 'important');
-  el.style.setProperty('max-height', '0px', 'important');
+// 2. Ẩn phần tử cờ bạc an toàn không để lại khoảng trống
+function collapseAdElement(el: HTMLElement | null): void {
+  if (!el || el.dataset.blockadsCleaned === '1') return;
+  // Tuyệt đối không bao giờ ẩn nhầm khung chứa trình phát video chính
+  if (el.querySelector('video, #player, #media-player, .jwplayer')) return;
+
+  el.dataset.blockadsCleaned = '1';
+  el.style.setProperty('display', 'none', 'important');
+  el.style.setProperty('visibility', 'hidden', 'important');
   el.style.setProperty('height', '0px', 'important');
-  el.style.setProperty('min-height', '0px', 'important');
+  el.style.setProperty('max-height', '0px', 'important');
   el.style.setProperty('margin', '0px', 'important');
   el.style.setProperty('padding', '0px', 'important');
   el.style.setProperty('overflow', 'hidden', 'important');
   el.style.setProperty('pointer-events', 'none', 'important');
-  el.style.setProperty('border', 'none', 'important');
 }
 
-/**
- * Quét sạch mọi banner cờ bạc (kể cả ảnh từ kho trung gian imgur/ibb) trên các trang phim
- */
-function cleanGamblingBannersOnPage(): void {
-  const currentHost = window.location.hostname.toLowerCase();
-  const isMovieSite = currentHost.includes('animevietsub') || currentHost.includes('rophim') || currentHost.includes('motchill');
+function isSafeSocialUrl(href: string): boolean {
+  return SAFE_EXTERNAL_DOMAINS.some((domain) => href.includes(domain));
+}
 
-  // 1. Quét toàn bộ các thẻ <a> dẫn ra ngoài (external links) hoặc mở tab mới (target="_blank") chứa ảnh banner
+function sweepGamblingBanners(): void {
+  const currentHost = window.location.hostname.toLowerCase();
+  const isMovieSite = currentHost.includes('animevietsub');
+
+  // Quét toàn bộ các thẻ <a> có chứa ảnh banner
   const links = document.querySelectorAll<HTMLAnchorElement>('a[href]');
   links.forEach((link) => {
     const href = (link.getAttribute('href') || '').toLowerCase();
+    if (!href || href.startsWith('javascript:') || href === '#') return;
+
     const img = link.querySelector('img');
-
-    // Bỏ qua các link chức năng hợp lệ của trang
-    const isSocialGroup = href.includes('facebook.com/groups') || href.includes('youtube.com') || href.includes('discord.gg');
-
-    // Kiểm tra xem URL đích hoặc ảnh bên trong có khớp từ khóa cờ bạc không
-    const imgSrc = (img?.getAttribute('src') || img?.getAttribute('data-src') || '').toLowerCase();
+    const imgSrc = (
+      img?.getAttribute('src') ||
+      img?.getAttribute('data-src') ||
+      img?.getAttribute('data-original') ||
+      ''
+    ).toLowerCase();
     const imgAlt = (img?.getAttribute('alt') || '').toLowerCase();
-    const combinedText = `${href} ${imgSrc} ${imgAlt}`;
+    const combined = `${href} ${imgSrc} ${imgAlt}`;
 
-    const matchesGamblingKeyword = GAMBLING_PATTERNS.some((kw) => combinedText.includes(kw));
+    // Dấu hiệu 1: Khớp trực tiếp tên nhà cái (VSbet, ViVU88, RikVIP, Nhất VIP, WIN79, SUN.WIN...)
+    const hasGamblingKeyword = GAMBLING_KEYWORDS.some((kw) => combined.includes(kw));
 
-    // Trên trang phim như animevietsub: Mọi thẻ <a target="_blank" rel="nofollow"> bọc ảnh GIF/Banner đều là quảng cáo cờ bạc!
-    const isExternalAdBannerOnMovieSite =
+    // Dấu hiệu 2: Trên trang phim, mọi thẻ <a> mở tab mới (target="_blank" hoặc rel="nofollow")
+    // chứa ảnh động .gif hoặc trỏ ra domain ngoài (trừ Group FB/Youtube) đều là banner nhà cái
+    const isExternalMovieBanner =
       isMovieSite &&
       img !== null &&
-      !isSocialGroup &&
-      (link.target === '_blank' ||
-        (link.rel && link.rel.includes('nofollow')) ||
-        imgSrc.endsWith('.gif') ||
+      !isSafeSocialUrl(href) &&
+      (imgSrc.includes('.gif') ||
+        link.target === '_blank' ||
+        link.rel.includes('nofollow') ||
         (href.startsWith('http') && !href.includes(currentHost)));
 
-    if (matchesGamblingKeyword || isExternalAdBannerOnMovieSite) {
-      stealthHideElement(link);
-      if (img) stealthHideElement(img);
-      // Nếu thẻ <a> nằm trong một khung chỉ chứa quảng cáo thì thu gọn cả khung đó
-      const parent = link.parentElement;
-      if (parent && parent.children.length <= 2 && !parent.querySelector('video, iframe')) {
-        stealthHideElement(parent);
+    if (hasGamblingKeyword || isExternalMovieBanner) {
+      collapseAdElement(link);
+      const wrapper = link.parentElement;
+      if (wrapper && wrapper.children.length <= 2 && wrapper.tagName !== 'BODY') {
+        collapseAdElement(wrapper);
       }
     }
   });
 
-  // 2. Xử lý thanh quảng cáo cờ bạc bám dính dưới đáy màn hình (Catfish banner như WIN79 / SUN.WIN có nút X đỏ)
-  const allElements = document.querySelectorAll<HTMLElement>('div, aside, section');
-  allElements.forEach((el) => {
+  // Quét các thanh quảng cáo cờ bạc bám dính ở đáy màn hình (Catfish banner như WIN79 / SUN.WIN có nút X đỏ)
+  const fixedContainers = document.querySelectorAll<HTMLElement>('div, aside, section, footer');
+  fixedContainers.forEach((el) => {
+    if (el.dataset.blockadsCleaned === '1') return;
     const style = window.getComputedStyle(el);
     if (style.position === 'fixed' || style.position === 'sticky') {
-      const bottomVal = parseInt(style.bottom || '999', 10);
-      // Nếu là thanh bám ở đáy màn hình (bottom <= 20px) và có chứa ảnh banner hoặc nút đóng 'X'
-      if (bottomVal <= 20 && el.offsetHeight > 30 && el.offsetHeight < 250) {
-        const hasBannerImg = el.querySelector('img') !== null;
-        const hasExternalLink = el.querySelector('a[target="_blank"], a[href^="http"]') !== null;
-        if (hasBannerImg || hasExternalLink) {
-          stealthHideElement(el);
+      const bottom = parseInt(style.bottom || '999', 10);
+      const zIndex = parseInt(style.zIndex || '0', 10);
+      if (bottom <= 50 && zIndex >= 10 && el.offsetHeight > 25 && el.offsetHeight < 320) {
+        const hasAdContent =
+          el.querySelector('img[src*=".gif"], a[target="_blank"], a[rel*="nofollow"]') !== null;
+        if (hasAdContent) {
+          collapseAdElement(el);
         }
       }
     }
@@ -102,7 +124,7 @@ function injectCosmeticCSS(cssText: string): void {
   if (!styleEl) {
     styleEl = document.createElement('style');
     styleEl.id = STYLE_ELEMENT_ID;
-    (document.head || document.documentElement)?.appendChild(styleEl);
+    (document.head || document.documentElement).appendChild(styleEl);
   }
   styleEl.textContent = cssText;
 }
@@ -110,44 +132,44 @@ function injectCosmeticCSS(cssText: string): void {
 export default defineContentScript({
   matches: ['<all_urls>'],
   runAt: 'document_start',
-  allFrames: true,
   async main() {
     const cosmeticEngine = CosmeticEngine.getInstance();
     const elementPicker = ElementPicker.getInstance();
-    const hostname = extractNormalizedDomain(window.location.hostname) || '';
+
+    const hostname = normalizeDomain(window.location.hostname);
     if (!hostname) return;
 
-    // Miễn trừ YouTube vì có cơ chế masthead riêng
+    // Miễn trừ YouTube vì có cơ chế player riêng
     if (hostname === 'youtube.com' || hostname.endsWith('.youtube.com')) {
       return;
     }
 
-    const whitelist = await getWhitelist();
+    const { whitelist } = await getStorageData();
     const isWhitelisted = whitelist.some((w) => hostname === w || hostname.endsWith(`.${w}`));
     if (isWhitelisted) return;
 
-    // Không tiêm CSS .ad-banner mặc định trên animevietsub để tránh chạm vào phần tử mồi nhử (bait) của Anti-Adblock
-    if (!hostname.includes('animevietsub')) {
-      const css = getCosmeticStylesheetForDomain(hostname, whitelist);
-      injectCosmeticCSS(css);
-    }
+    injectAntiAdblockDefuser();
 
-    // Chạy bộ quét diệt banner cờ bạc liên tục khi trang đang tải và khi DOM thay đổi
-    const runCleaner = () => cleanGamblingBannersOnPage();
+    const css = getCosmeticStylesheetForDomain(hostname, whitelist);
+    injectCosmeticCSS(css);
+
+    let rafId: number | null = null;
+    const scheduleSweep = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        sweepGamblingBanners();
+      });
+    };
 
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', runCleaner);
+      document.addEventListener('DOMContentLoaded', scheduleSweep);
     } else {
-      runCleaner();
+      scheduleSweep();
     }
+    window.addEventListener('load', scheduleSweep);
 
-    window.addEventListener('load', runCleaner);
-
-    // Theo dõi nếu trang tự chèn thêm banner cờ bạc sau vài giây (như WIN79 ở đáy trang)
-    const observer = new MutationObserver(() => {
-      cleanGamblingBannersOnPage();
-    });
-
+    const observer = new MutationObserver(scheduleSweep);
     const startObserver = () => {
       if (document.body) {
         observer.observe(document.body, { childList: true, subtree: true });
@@ -161,7 +183,7 @@ export default defineContentScript({
     }
 
     // Lắng nghe các lệnh từ Popup hoặc Background
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       switch (message.type) {
         case 'START_TEMP_PICKER':
           elementPicker.activate();
@@ -180,7 +202,7 @@ export default defineContentScript({
 
         case 'TOGGLE_COSMETIC':
           if (message.enabled) {
-            cleanGamblingBannersOnPage();
+            scheduleSweep();
           }
           sendResponse({ success: true });
           break;

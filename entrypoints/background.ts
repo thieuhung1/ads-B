@@ -1,26 +1,36 @@
 import { defineBackground } from 'wxt/utils/define-background';
+import { BADGE_CONFIG, RULESET_METADATA } from '../src/constants';
+import { formatBadgeCount, incrementBlockStats, getEnabledRulesets, setEnabledRulesets } from '../src/storage';
+import { syncWhitelistToDynamicRules } from '../src/whitelist';
 import { WhitelistManager } from '../src/background/whitelist-manager';
 import { StatsManager } from '../src/background/stats-manager';
-import { BADGE_CONFIG, RULESET_METADATA } from '../src/constants';
-import { getEnabledRulesets, setEnabledRulesets, incrementBlockStats } from '../src/storage';
 import type { MessageType, TabState } from '../src/shared/types';
+
+async function getTabCount(tabId: number): Promise<number> {
+  const key = `tab_${tabId}`;
+  const data = await chrome.storage.session.get({ [key]: 0 });
+  return Number(data[key]) || 0;
+}
+
+async function setTabCount(tabId: number, count: number): Promise<void> {
+  const key = `tab_${tabId}`;
+  await chrome.storage.session.set({ [key]: count });
+}
 
 export default defineBackground(() => {
   const whitelistManager = WhitelistManager.getInstance();
   const statsManager = StatsManager.getInstance();
 
-  console.log('[BlockAds 2.0] Service Worker khởi động (Manifest V3 Production-Ready).');
-
-  async function initializeExtension() {
+  async function initBackground(): Promise<void> {
     try {
-      await chrome.action.setBadgeBackgroundColor({ color: BADGE_CONFIG.ALERT_COLOR });
+      await chrome.action.setBadgeBackgroundColor({ color: BADGE_CONFIG.COLOR });
     } catch {}
 
-    await whitelistManager.syncDynamicRules().catch(console.error);
+    await syncWhitelistToDynamicRules().catch(console.error);
 
-    // SỬA BUG 1: Bật tính năng tự động hiển thị số lượng chặn chuẩn Production của Chrome MV3
+    // Bật tính năng tự động hiển thị số lượng chặn chuẩn Production của Chrome MV3
     try {
-      if (chrome.declarativeNetRequest?.setExtensionActionOptions) {
+      if (chrome.declarativeNetRequest.setExtensionActionOptions) {
         await chrome.declarativeNetRequest.setExtensionActionOptions({
           displayActionCountAsBadgeText: true
         });
@@ -28,17 +38,32 @@ export default defineBackground(() => {
     } catch {}
   }
 
-  // Khởi tạo ngay khi Service Worker thức dậy
-  initializeExtension().catch(console.error);
+  initBackground().catch(console.error);
 
-  chrome.runtime.onInstalled.addListener(async (details) => {
-    console.log('[BlockAds 2.0] onInstalled:', details.reason);
-    await initializeExtension();
+  chrome.runtime.onInstalled.addListener(() => {
+    initBackground().catch(console.error);
   });
 
-  chrome.runtime.onStartup.addListener(async () => {
-    await initializeExtension();
+  chrome.runtime.onStartup.addListener(() => {
+    initBackground().catch(console.error);
   });
+
+  // Tự động đồng bộ lại Dynamic Rules bất cứ khi nào danh sách Whitelist trong Storage thay đổi
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'local' && (changes.whitelist || changes.blockads_whitelist)) {
+      syncWhitelistToDynamicRules().catch(console.error);
+    }
+  });
+
+  async function updateTabBadge(tabId: number, count: number): Promise<void> {
+    if (tabId < 0) return;
+    try {
+      await chrome.action.setBadgeText({ tabId, text: formatBadgeCount(count) });
+      await chrome.action.setBadgeBackgroundColor({ tabId, color: BADGE_CONFIG.COLOR });
+    } catch {
+      // Tab đã đóng
+    }
+  }
 
   // 1. Chế độ Developer Mode (Unpacked): Cập nhật tức thì qua onRuleMatchedDebug
   if (chrome.declarativeNetRequest?.onRuleMatchedDebug) {
@@ -46,6 +71,9 @@ export default defineBackground(() => {
       if (info.rule?.rulesetId === '_dynamic') return;
       const tabId = info.request?.tabId;
       if (tabId && tabId > 0) {
+        const nextCount = (await getTabCount(tabId)) + 1;
+        await setTabCount(tabId, nextCount);
+        await updateTabBadge(tabId, nextCount);
         await statsManager.recordBlock(tabId);
       }
     });
@@ -54,6 +82,8 @@ export default defineBackground(() => {
   // 2. Chế độ Production Fallback: Đồng bộ qua getMatchedRules khi Tab tải xong
   chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
     if (changeInfo.status === 'loading') {
+      await setTabCount(tabId, 0);
+      await updateTabBadge(tabId, 0);
       statsManager.resetTab(tabId);
     } else if (
       changeInfo.status === 'complete' &&
@@ -64,26 +94,25 @@ export default defineBackground(() => {
         const matched = await chrome.declarativeNetRequest.getMatchedRules({ tabId });
         const count = matched?.rulesMatchedInfo?.length || 0;
         if (count > 0) {
-          const currentCount = await statsManager.getTabBlockedCountAsync(tabId);
-          if (count > currentCount) {
-            const delta = count - currentCount;
-            await statsManager.setTabBlockedCount(tabId, count);
-            await incrementBlockStats(delta);
-          }
+          await setTabCount(tabId, count);
+          await updateTabBadge(tabId, count);
+          await statsManager.setTabBlockedCount(tabId, count);
+          await incrementBlockStats(count);
         }
       } catch {
-        // Tab hệ thống hoặc không có quyền truy cập
+        // Bỏ qua các tab hệ thống chrome:// hoặc edge://
       }
     }
   });
 
   chrome.tabs.onRemoved.addListener((tabId) => {
+    chrome.storage.session.remove(`tab_${tabId}`).catch(() => {});
     statsManager.removeTab(tabId);
   });
 
   chrome.tabs.onActivated.addListener(async (activeInfo) => {
-    const count = await statsManager.getTabBlockedCountAsync(activeInfo.tabId);
-    await statsManager.updateTabBadge(activeInfo.tabId, count);
+    const count = await getTabCount(activeInfo.tabId);
+    await updateTabBadge(activeInfo.tabId, count);
   });
 
   // Message Handler từ Popup và Content Scripts
@@ -110,14 +139,16 @@ export default defineBackground(() => {
           const domain = whitelistManager.normalizeDomain(rawUrl);
           const isWhitelisted = domain ? await whitelistManager.isWhitelisted(domain) : false;
 
-          let blockedCount = tabId ? await statsManager.getTabBlockedCountAsync(tabId) : 0;
+          let blockedCount = tabId ? await getTabCount(tabId) : 0;
           if (tabId && chrome.declarativeNetRequest?.getMatchedRules) {
             try {
               const matched = await chrome.declarativeNetRequest.getMatchedRules({ tabId });
-              const matchedTotal = matched.rulesMatchedInfo?.length || 0;
+              const matchedTotal = matched?.rulesMatchedInfo?.length || 0;
               if (matchedTotal > blockedCount) {
                 const delta = matchedTotal - blockedCount;
                 blockedCount = matchedTotal;
+                await setTabCount(tabId, blockedCount);
+                await updateTabBadge(tabId, blockedCount);
                 await statsManager.setTabBlockedCount(tabId, blockedCount);
                 await incrementBlockStats(delta);
               }

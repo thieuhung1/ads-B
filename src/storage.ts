@@ -37,7 +37,6 @@ export const DEFAULT_STORAGE: StorageSchema = {
   }
 };
 
-// SỬA BUG 4: Loại bỏ hoàn toàn chrome://, edge://, about:blank và chuỗi không phải domain
 export function normalizeDomain(input: string | undefined | null): string {
   if (!input || typeof input !== 'string') return '';
   const trimmed = input.trim().toLowerCase();
@@ -45,14 +44,14 @@ export function normalizeDomain(input: string | undefined | null): string {
 
   try {
     const hasProtocol = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(trimmed);
-    const parsed = new URL(hasProtocol ? trimmed : `https://${trimmed}`);
+    const url = new URL(hasProtocol ? trimmed : `https://${trimmed}`);
 
-    if (!VALID_PROTOCOLS.has(parsed.protocol)) {
+    if (!VALID_PROTOCOLS.has(url.protocol)) {
       return '';
     }
 
-    const cleanHost = parsed.hostname.replace(/^www\./, '');
-    return cleanHost.includes('.') || cleanHost === 'localhost' ? cleanHost : '';
+    const hostname = url.hostname.replace(/^www\./, '');
+    return hostname.includes('.') || hostname === 'localhost' ? hostname : '';
   } catch {
     return '';
   }
@@ -60,94 +59,102 @@ export function normalizeDomain(input: string | undefined | null): string {
 
 export function formatBadgeCount(count: number): string {
   if (count <= 0) return '';
-  return count > BADGE_CONFIG.MAX_DISPLAY_COUNT ? BADGE_CONFIG.OVERFLOW_TEXT : String(count);
+  return count > BADGE_CONFIG.MAX_COUNT
+    ? BADGE_CONFIG.OVERFLOW_TEXT
+    : String(count);
 }
 export const formatBadgeText = formatBadgeCount;
 
-// SỬA BUG 2: Gom nhóm các lượt chặn trong 250ms và ghi tuần tự qua Promise Mutex chống mất số liệu
-let pendingIncrement = 0;
+// Hàng đợi tuần tự (Promise Mutex): Chống Race Condition 100% và trả kết quả tức thì cho Caller
+let statsMutex: Promise<BlockStats> = Promise.resolve(DEFAULT_STORAGE.stats);
 let pendingDomainDeltas: Record<string, number> = {};
-let flushTimer: ReturnType<typeof setTimeout> | null = null;
-let writeMutex: Promise<BlockStats> = Promise.resolve(DEFAULT_STORAGE.stats);
+let queueTimer: ReturnType<typeof setTimeout> | null = null;
+let queuedAmount = 0;
 
-export function incrementBlockStats(amount = 1): Promise<BlockStats> {
-  if (amount <= 0) return getStats();
-  pendingIncrement += amount;
-
-  if (!flushTimer) {
-    flushTimer = setTimeout(() => {
-      const delta = pendingIncrement;
-      pendingIncrement = 0;
-      flushTimer = null;
-      writeMutex = writeMutex.then(() => commitStatsDelta(delta));
-    }, 250);
+export function incrementBlockStats(amount = 1, domain?: string): Promise<BlockStats> {
+  if (amount <= 0) {
+    return getStats();
   }
-  return writeMutex;
+
+  if (domain) {
+    const clean = normalizeDomain(domain);
+    if (clean) {
+      pendingDomainDeltas[clean] = (pendingDomainDeltas[clean] || 0) + amount;
+    }
+  }
+
+  statsMutex = statsMutex
+    .catch(() => DEFAULT_STORAGE.stats)
+    .then(async () => {
+      const deltasToCommit = { ...pendingDomainDeltas };
+      pendingDomainDeltas = {};
+
+      const data = await chrome.storage.local.get(STORAGE_KEYS.STATS);
+      let current: BlockStats = data?.[STORAGE_KEYS.STATS];
+      if (!current) {
+        const altData = await chrome.storage.local.get('stats');
+        current = altData?.['stats'];
+      }
+      if (!current) current = DEFAULT_STORAGE.stats;
+
+      const today = getTodayString();
+      const isNewDay = current.lastResetDate !== today;
+      const baseToday = isNewDay ? 0 : current.todayCount;
+      const baseTotal = current.totalCount;
+
+      const updatedByDomain = { ...(current.byDomain || {}) };
+      for (const [dom, count] of Object.entries(deltasToCommit)) {
+        updatedByDomain[dom] = (updatedByDomain[dom] || 0) + count;
+      }
+
+      const updated: BlockStats = {
+        todayCount: baseToday + amount,
+        totalCount: baseTotal + amount,
+        lastResetDate: today,
+        byDomain: updatedByDomain
+      };
+
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.STATS]: updated,
+        stats: updated
+      });
+      return updated;
+    });
+
+  return statsMutex;
 }
 
 export function queueStatIncrement(delta = 1, domain?: string): void {
   if (delta <= 0) return;
+  queuedAmount += delta;
   if (domain) {
-    const cleanDomain = normalizeDomain(domain);
-    if (cleanDomain) {
-      pendingDomainDeltas[cleanDomain] = (pendingDomainDeltas[cleanDomain] || 0) + delta;
+    const clean = normalizeDomain(domain);
+    if (clean) {
+      pendingDomainDeltas[clean] = (pendingDomainDeltas[clean] || 0) + delta;
     }
   }
-  incrementBlockStats(delta);
+
+  if (!queueTimer) {
+    queueTimer = setTimeout(() => {
+      const amount = queuedAmount;
+      queuedAmount = 0;
+      queueTimer = null;
+      incrementBlockStats(amount);
+    }, 250);
+  }
 }
 
 export async function flushPendingStats(): Promise<void> {
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
+  if (queueTimer) {
+    clearTimeout(queueTimer);
+    queueTimer = null;
   }
-  const delta = pendingIncrement;
-  pendingIncrement = 0;
-  writeMutex = writeMutex.then(() => commitStatsDelta(delta));
-  await writeMutex;
-}
-
-async function commitStatsDelta(delta: number): Promise<BlockStats> {
-  const deltasToCommit = { ...pendingDomainDeltas };
-  pendingDomainDeltas = {};
-
-  const today = getTodayString();
-  const data = await chrome.storage.local.get(STORAGE_KEYS.STATS);
-  let current: BlockStats = data?.[STORAGE_KEYS.STATS];
-  if (!current) {
-    const altData = await chrome.storage.local.get('stats');
-    current = altData?.['stats'];
+  const amount = queuedAmount;
+  queuedAmount = 0;
+  if (amount > 0) {
+    await incrementBlockStats(amount);
   }
-  if (!current) {
-    current = {
-      todayCount: 0,
-      totalCount: 0,
-      lastResetDate: today,
-      byDomain: {}
-    };
-  }
-
-  const isNewDay = current.lastResetDate !== today;
-  const baseToday = isNewDay ? 0 : current.todayCount;
-  const baseTotal = current.totalCount;
-
-  const updatedByDomain = { ...(current.byDomain || {}) };
-  for (const [dom, count] of Object.entries(deltasToCommit)) {
-    updatedByDomain[dom] = (updatedByDomain[dom] || 0) + count;
-  }
-
-  const updated: BlockStats = {
-    todayCount: baseToday + delta,
-    totalCount: baseTotal + delta,
-    lastResetDate: today,
-    byDomain: updatedByDomain
-  };
-
-  await chrome.storage.local.set({
-    [STORAGE_KEYS.STATS]: updated,
-    stats: updated
-  });
-  return updated;
+  await statsMutex;
 }
 
 export async function getStats(): Promise<BlockStats> {
@@ -190,8 +197,8 @@ export async function getStats(): Promise<BlockStats> {
     }
 
     return {
-      todayCount: baseToday + pendingIncrement,
-      totalCount: baseTotal + pendingIncrement,
+      todayCount: baseToday + queuedAmount,
+      totalCount: baseTotal + queuedAmount,
       lastResetDate: today,
       byDomain: mergedByDomain
     };
@@ -201,11 +208,11 @@ export async function getStats(): Promise<BlockStats> {
 }
 
 export async function resetStats(): Promise<void> {
-  pendingIncrement = 0;
+  queuedAmount = 0;
   pendingDomainDeltas = {};
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
+  if (queueTimer) {
+    clearTimeout(queueTimer);
+    queueTimer = null;
   }
   const cleared: BlockStats = {
     todayCount: 0,

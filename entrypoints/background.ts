@@ -11,6 +11,9 @@ export default defineBackground(() => {
 
   console.log('[BlockAds 2.0] Service Worker khởi động (Manifest V3 Clean Architecture).');
 
+  // Kích hoạt đồng bộ Dynamic Rules ngay lập tức khi Service Worker thức dậy / reload
+  whitelistManager.syncDynamicRules().catch(console.error);
+
   // BUG-01 Fix: Bật cơ chế đếm Badge gốc trên Production nếu trình duyệt hỗ trợ
   try {
     if (chrome.declarativeNetRequest?.setExtensionActionOptions) {
@@ -21,6 +24,7 @@ export default defineBackground(() => {
   } catch {
     // Không hỗ trợ trên một số bản Chromium cũ
   }
+
 
   // Khởi tạo và đồng bộ dynamic rules
   chrome.runtime.onInstalled.addListener(async (details) => {

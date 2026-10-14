@@ -1,5 +1,16 @@
 import { DNR_CONFIG } from './constants';
 import { extractNormalizedDomain } from './domain';
+import { getWhitelist as storageGetWhitelist } from './storage';
+
+export const ANTI_ADBLOCK_MOVIE_DOMAINS = [
+  'animevietsub.nl',
+  'animevietsub.tv',
+  'animevietsub.io',
+  'animevietsub.cc',
+  'animevietsub.org'
+] as const;
+
+export const ANTI_ADBLOCK_BYPASS_ID_OFFSET = 20000;
 
 /**
  * Sinh danh sách Dynamic Rules chuẩn DeclarativeNetRequest cho Whitelist.
@@ -17,7 +28,6 @@ export function buildWhitelistRules(domains: readonly string[]): chrome.declarat
   uniqueDomains.forEach((domain, idx) => {
     const baseRuleId = DNR_CONFIG.WHITELIST_RULE_ID_START + idx * 2;
 
-    // Tránh vượt quá dải ID quy định (10000 - 19999)
     if (baseRuleId + 1 > DNR_CONFIG.WHITELIST_RULE_ID_END) {
       console.warn(`[BlockAds Whitelist] Vượt quá giới hạn số lượng domain cho phép trong Whitelist (${DNR_CONFIG.WHITELIST_RULE_ID_END})`);
       return;
@@ -49,32 +59,74 @@ export function buildWhitelistRules(domains: readonly string[]): chrome.declarat
 }
 
 /**
+ * Sinh danh sách quy tắc bypass Anti-Adblock tầng mạng cho các trang phim
+ */
+export function buildMovieAntiAdblockBypassRules(): chrome.declarativeNetRequest.Rule[] {
+  const rules: chrome.declarativeNetRequest.Rule[] = [];
+
+  ANTI_ADBLOCK_MOVIE_DOMAINS.forEach((movieDomain, index) => {
+    rules.push({
+      id: ANTI_ADBLOCK_BYPASS_ID_OFFSET + index * 2 + 1,
+      priority: 100,
+      action: { type: 'allowAllRequests' as chrome.declarativeNetRequest.RuleActionType },
+      condition: {
+        requestDomains: [movieDomain],
+        resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType]
+      }
+    });
+
+    rules.push({
+      id: ANTI_ADBLOCK_BYPASS_ID_OFFSET + index * 2 + 2,
+      priority: 100,
+      action: { type: 'allow' as chrome.declarativeNetRequest.RuleActionType },
+      condition: {
+        initiatorDomains: [movieDomain]
+      }
+    });
+  });
+
+  return rules;
+}
+
+export function buildWhitelistDynamicRules(domains: readonly string[]): chrome.declarativeNetRequest.Rule[] {
+  return [...buildWhitelistRules(domains), ...buildMovieAntiAdblockBypassRules()];
+}
+
+/**
  * BUG-04 Fix: Đồng bộ nguyên tử (Atomic Sync) danh sách Dynamic Rules vào DeclarativeNetRequest.
- * Luôn xóa toàn bộ ID cũ trong dải 10000–19999 và nạp rules mới cùng lúc trong 1 giao dịch duy nhất.
+ * Luôn xóa toàn bộ ID cũ trong dải Whitelist (10000–19999) & Anti-Adblock Bypass (20000-20999)
+ * và nạp rules mới cùng lúc trong 1 giao dịch duy nhất.
  */
 export async function syncWhitelistDynamicRules(whitelist: readonly string[]): Promise<void> {
   try {
     const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
 
-    // Chỉ xóa các ID nằm trong dải dành riêng cho Whitelist (10000 - 19999)
     const removeRuleIds = existingRules
       .filter(
         (r) =>
-          r.id >= DNR_CONFIG.WHITELIST_RULE_ID_START &&
-          r.id <= DNR_CONFIG.WHITELIST_RULE_ID_END
+          (r.id >= DNR_CONFIG.WHITELIST_RULE_ID_START && r.id <= DNR_CONFIG.WHITELIST_RULE_ID_END) ||
+          (r.id >= ANTI_ADBLOCK_BYPASS_ID_OFFSET && r.id < ANTI_ADBLOCK_BYPASS_ID_OFFSET + 1000)
       )
       .map((r) => r.id);
 
-    const addRules = buildWhitelistRules(whitelist);
+    const userRules = buildWhitelistRules(whitelist);
+    const bypassRules = buildMovieAntiAdblockBypassRules();
+    const addRules = [...userRules, ...bypassRules];
 
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds,
       addRules,
     });
 
-    console.log(`[BlockAds Whitelist] Đã đồng bộ nguyên tử ${addRules.length} dynamic rules cho ${whitelist.length} domain.`);
+    console.log(`[BlockAds Whitelist] Đã đồng bộ nguyên tử ${addRules.length} dynamic rules (bao gồm ${bypassRules.length} rules vượt anti-adblock phim).`);
   } catch (err) {
     console.error('[BlockAds Whitelist] Lỗi đồng bộ Dynamic Rules:', err);
     throw err;
   }
+}
+
+export async function syncWhitelistToDynamicRules(): Promise<string[]> {
+  const list = await storageGetWhitelist();
+  await syncWhitelistDynamicRules(list);
+  return list;
 }

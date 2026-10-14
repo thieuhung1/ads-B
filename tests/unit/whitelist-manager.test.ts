@@ -83,18 +83,21 @@ describe('WhitelistManager', () => {
 
     const list = await manager.getWhitelist();
     expect(list.length).toBe(0);
-    expect(mockDynamicRules.length).toBe(0);
+    const userRules = mockDynamicRules.filter(r => r.id >= 10000 && r.id < 20000);
+    expect(userRules.length).toBe(0);
   });
 
   it('đồng bộ chính xác các dynamic rules với DeclarativeNetRequest', async () => {
     await manager.addDomain('vnexpress.net');
-    expect(mockDynamicRules.length).toBe(2);
+    const userRules = mockDynamicRules.filter(r => r.id >= 10000 && r.id < 20000);
+    expect(userRules.length).toBe(2);
     // BUG-03 Rule 1: allowAllRequests main_frame
-    expect(mockDynamicRules[0]?.action?.type).toBe('allowAllRequests');
-    expect(mockDynamicRules[0]?.condition?.requestDomains).toEqual(['vnexpress.net']);
+    expect(userRules[0]?.action?.type).toBe('allowAllRequests');
+    expect(userRules[0]?.condition?.requestDomains).toEqual(['vnexpress.net']);
     // BUG-03 Rule 2: allow initiatorDomains
-    expect(mockDynamicRules[1]?.action?.type).toBe('allow');
-    expect(mockDynamicRules[1]?.condition?.initiatorDomains).toEqual(['vnexpress.net']);
+    expect(userRules[1]?.action?.type).toBe('allow');
+    expect(userRules[1]?.condition?.initiatorDomains).toEqual(['vnexpress.net']);
   });
 });
+
 

@@ -1,9 +1,68 @@
+import { extractNormalizedDomain } from './domain';
+
+// 1. Chỉ giữ các selector thực sự là khung quảng cáo, tránh các class mồi nhử (.adsbox, .ad-banner) trên anti-adblock
+export const GENERIC_AD_SELECTORS: readonly string[] = [
+  'div[id^="google_ads_iframe_"]',
+  'iframe[src*="doubleclick.net"]',
+  'div[class*="qc-banner"]',
+  // Chặn trực tiếp các thẻ <a> và <img> dẫn tới trang cờ bạc/cá độ
+  'a[href*="vsbet"]',
+  'a[href*="vivu88"]',
+  'a[href*="rikvip"]',
+  'a[href*="nhatvip"]',
+  'a[href*="go88"]',
+  'a[href*="sunwin"]',
+  'a[href*="kubet"]',
+  'a[href*="f8bet"]',
+  'a[href*="shbet"]',
+  'a[href*="hi88"]',
+  'a[href*="new88"]',
+  'a[href*="jun88"]',
+  'a[href*="8xbet"]',
+  'a[href*="fb88"]',
+  'a[href*="w88"]',
+  'a[href*="m88"]',
+  'a[href*="188bet"]',
+  'a[href*="fun88"]',
+  'img[src*="vsbet"]',
+  'img[src*="vivu88"]',
+  'img[src*="rikvip"]',
+  'img[src*="nhatvip"]',
+  'img[alt*="VSbet" i]',
+  'img[alt*="Vivu88" i]',
+  'img[alt*="Rikvip" i]',
+  'img[alt*="Nhatvip" i]'
+] as const;
+
+// 2. Selector đặc thù cho các trang báo & trang xem phim/anime Việt Nam
+export const SITE_SPECIFIC_SELECTORS: Record<string, string[]> = {
+  'vnexpress.net': ['#sis_large1', '.box_qc', '.banner-ads'],
+  'dantri.com.vn': ['.dt-ads', 'div[id^="admzone"]', '.ads-top-banner'],
+  'kenh14.vn': ['.k14-ads', 'div[id^="admzone"]', '.adm-sponsored'],
+  '24h.com.vn': ['.banner-24h-ads', 'div[id^="banner_"]', '.box-quang-cao'],
+  'animevietsub.nl': [
+    // Ẩn các khung banner cờ bạc trên đầu, dưới player và cột phải của AnimeVietsub
+    '.ad-top',
+    '.ads-top',
+    '.ad-header',
+    '.banner-quangcao',
+    '.widget-ads',
+    'div[id*="quangcao"]',
+    'div[class*="quangcao"]',
+    'a[target="_blank"][rel*="nofollow"] > img[src$=".gif"]'
+  ]
+};
+
+// 3. Danh sách từ khóa nhận diện nhanh quảng cáo cờ bạc / cá độ (dùng để quét DOM động)
+export const GAMBLING_KEYWORDS: readonly string[] = [
+  'vsbet', 'vivu88', 'rikvip', 'nhatvip', 'go88', 'sunwin', 'b52',
+  '789club', 'hitclub', 'kubet', 'f8bet', 'shbet', 'hi88', 'new88',
+  'jun88', 'mb66', '8xbet', '188bet', 'w88', 'm88', 'fb88', 'fun88',
+  'vn88', 'bk8', 'nhà cái', 'cá cược', 'tài xỉu', 'nổ hũ', 'casino'
+] as const;
+
 /**
  * Danh sách selector quảng cáo toàn cầu - Độ chính xác cao (Zero False-Positive)
- * TUYỆT ĐỐI không dùng wildcard substring nguy hiểm như:
- * - [class*="ad-container"] (khớp nhầm upload-container, load-container)
- * - [class*="ad-wrapper"] (khớp nhầm upload-wrapper, load-wrapper)
- * - [id*="-ad-"] (khớp nhầm azure-ad-login, lead-admin)
  */
 export const GLOBAL_AD_SELECTORS: readonly string[] = [
   // Google AdSense & GAM / DFP
@@ -54,12 +113,14 @@ export const GLOBAL_AD_SELECTORS: readonly string[] = [
   '.outbrain-ad',
   '.taboola-ad',
   '#taboola-below-article-thumbnails',
-  '#outbrain-widget'
+  '#outbrain-widget',
+
+  // Selector cờ bạc
+  ...GENERIC_AD_SELECTORS
 ] as const;
 
 /**
  * Danh sách selector đặc thù mạng quảng cáo Việt Nam (Admicro, eClick, Ambient, Ants, 24h, Kenh14)
- * TUYỆT ĐỐI không dùng [class*="eclick"] (tránh khớp nhầm nút oneclick-buy trên Shopee/Lazada/Tiki)
  */
 export const VN_AD_SELECTORS: readonly string[] = [
   '.quang-cao',
@@ -106,7 +167,6 @@ export const ALL_COSMETIC_SELECTORS = [
 
 /**
  * Danh sách selector chuyên biệt cho YouTube
- * Chỉ ẩn các khung quảng cáo thật sự, TUYỆT ĐỐI không làm mất #masthead-container, #search hay logo
  */
 export const YOUTUBE_AD_SELECTORS: readonly string[] = [
   '#masthead-ad',
@@ -121,12 +181,46 @@ export const YOUTUBE_AD_SELECTORS: readonly string[] = [
 ] as const;
 
 /**
+ * Tạo stylesheet chuyên sâu cho từng domain, hỗ trợ bypass Anti-Adblock và diệt quảng cáo cờ bạc
+ */
+export function getCosmeticStylesheetForDomain(hostname: string, whitelist: string[] = []): string {
+  const domain = extractNormalizedDomain(hostname);
+  if (!domain) return '';
+
+  const isWhitelisted = whitelist.some(
+    (w) => domain === w || domain.endsWith(`.${w}`)
+  );
+  if (isWhitelisted) return '';
+
+  const matchedSiteSelectors: string[] = [];
+  for (const [siteDomain, selectors] of Object.entries(SITE_SPECIFIC_SELECTORS)) {
+    if (domain === siteDomain || domain.endsWith(`.${siteDomain}`) || domain.includes('animevietsub')) {
+      matchedSiteSelectors.push(...selectors);
+    }
+  }
+
+  // Nếu đang ở trang có Anti-Adblock mạnh như animevietsub, chỉ dùng bộ lọc Cờ bạc + Site Specific,
+  // BỎ QUA các generic selector dễ chạm vào "bẫy" phát hiện Adblock!
+  const isAntiAdblockSite = domain.includes('animevietsub') || domain.includes('rophim') || domain.includes('motchill');
+
+  const activeSelectors = isAntiAdblockSite
+    ? [...GENERIC_AD_SELECTORS.filter((s) => s.includes('href') || s.includes('img')), ...matchedSiteSelectors]
+    : [...GENERIC_AD_SELECTORS, ...matchedSiteSelectors];
+
+  return generateCss(activeSelectors);
+}
+
+/**
  * Lấy danh sách selector an toàn tùy biến theo từng domain
  */
 export function getSelectorsForDomain(domain?: string): readonly string[] {
   const clean = (domain || '').toLowerCase().replace(/^www\./, '');
   if (clean === 'youtube.com' || clean.endsWith('.youtube.com')) {
     return YOUTUBE_AD_SELECTORS;
+  }
+  if (clean.includes('animevietsub') || clean.includes('rophim') || clean.includes('motchill')) {
+    const siteSpecific = SITE_SPECIFIC_SELECTORS['animevietsub.nl'] || [];
+    return [...GENERIC_AD_SELECTORS, ...siteSpecific];
   }
   return ALL_COSMETIC_SELECTORS;
 }
@@ -139,13 +233,13 @@ export function generateCss(selectors: readonly string[]): string {
   const selectorString = selectors.join(',\n');
   return `${selectorString} {
   display: none !important;
-  min-height: 0 !important;
+  visibility: hidden !important;
   height: 0 !important;
+  min-height: 0 !important;
   max-height: 0 !important;
   margin: 0 !important;
   padding: 0 !important;
   opacity: 0 !important;
-  visibility: hidden !important;
   pointer-events: none !important;
 }`;
 }

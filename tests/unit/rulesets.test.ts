@@ -24,9 +24,8 @@ describe('DNR Rulesets Verification', () => {
       const rules = JSON.parse(content);
       total += rules.length;
     });
-    expect(total).toBeGreaterThanOrEqual(300);
+    expect(total).toBeGreaterThanOrEqual(500);
     expect(total).toBeLessThanOrEqual(5000);
-    expect(total).toBe(500); // 220 + 160 + 120
   });
 
   it('các rule ID là duy nhất và không bị xung đột trên toàn hệ thống', () => {
@@ -38,8 +37,8 @@ describe('DNR Rulesets Verification', () => {
         expect(allIds.has(r.id), `ID ${r.id} bị trùng lặp trong file ${f}`).toBe(false);
         allIds.add(r.id);
         expect(r.id).toBeGreaterThan(0);
-        expect(r.action.type).toBe('block');
-        expect(r.condition.urlFilter).toBeDefined();
+        expect(['block', 'allow']).toContain(r.action.type);
+        expect(r.condition.urlFilter || r.condition.regexFilter).toBeDefined();
       });
     });
   });

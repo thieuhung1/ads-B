@@ -200,12 +200,90 @@ async function build() {
   idCounter = 3000;
   const easyPrivacyRules = combinedEasyPrivacy.map(domain => createDnrRule(++idCounter, domain, 'easyprivacy'));
 
-  // 3. ABPVN (Việt Nam)
-  console.log('📥 Đang xử lý ABPVN...');
+  // 3. ABPVN (Việt Nam) + Chặn Cờ Bạc & Bypass Anti-Adblock (9001 - 9008)
+  console.log('📥 Đang xử lý ABPVN & Gambling Adblock...');
   const remoteAbpvn = await fetchAndExtractDomains('https://raw.githubusercontent.com/abpvn/abpvn/master/filter/abpvn.txt', 150);
   const combinedAbpvn = Array.from(new Set([...CURATED_ABPVN_DOMAINS, ...remoteAbpvn])).slice(0, 120);
   idCounter = 5000;
-  const abpvnRules = combinedAbpvn.map(domain => createDnrRule(++idCounter, domain, 'abpvn'));
+  const standardAbpvnRules = combinedAbpvn.map(domain => createDnrRule(++idCounter, domain, 'abpvn'));
+
+  const gamblingAndAntiAdblockRules = [
+    {
+      id: 9001,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*vsbet*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9002,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*vivu88*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9003,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*rikvip*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9004,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*nhatvip*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9005,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        regexFilter: '.*(go88|sunwin|b52club|789club|hitclub|kubet|f8bet|shbet|hi88|new88|jun88|mb66|ok9|8xbet|188bet|w88|m88|fb88|fun88|vn88|dafabet|bk8|cmd368).*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest']
+      }
+    },
+    {
+      id: 9006,
+      priority: 50,
+      action: { type: 'allow' },
+      condition: {
+        initiatorDomains: ['animevietsub.nl', 'animevietsub.tv', 'animevietsub.io', 'animevietsub.cc'],
+        urlFilter: '||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
+        resourceTypes: ['script', 'xmlhttprequest']
+      }
+    },
+    {
+      id: 9007,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*blockadblock*',
+        resourceTypes: ['script']
+      }
+    },
+    {
+      id: 9008,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*fuckadblock*',
+        resourceTypes: ['script']
+      }
+    }
+  ];
+
+  const abpvnRules = [...standardAbpvnRules, ...gamblingAndAntiAdblockRules];
 
   // Lưu file JSON
   const easylistPath = path.join(RULES_DIR, 'ruleset-easylist.json');

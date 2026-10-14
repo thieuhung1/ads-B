@@ -54,7 +54,35 @@ export const GLOBAL_AD_SELECTORS: readonly string[] = [
   '.outbrain-ad',
   '.taboola-ad',
   '#taboola-below-article-thumbnails',
-  '#outbrain-widget'
+  '#outbrain-widget',
+
+  // Chặn trực tiếp liên kết và ảnh nhà cái cờ bạc
+  'a[href*="vsbet"]',
+  'a[href*="vivu88"]',
+  'a[href*="rikvip"]',
+  'a[href*="nhatvip"]',
+  'a[href*="go88"]',
+  'a[href*="sunwin"]',
+  'a[href*="kubet"]',
+  'a[href*="f8bet"]',
+  'a[href*="shbet"]',
+  'a[href*="hi88"]',
+  'a[href*="new88"]',
+  'a[href*="jun88"]',
+  'a[href*="8xbet"]',
+  'a[href*="fb88"]',
+  'a[href*="w88"]',
+  'a[href*="m88"]',
+  'a[href*="188bet"]',
+  'a[href*="fun88"]',
+  'img[src*="vsbet"]',
+  'img[src*="vivu88"]',
+  'img[src*="rikvip"]',
+  'img[src*="nhatvip"]',
+  'img[alt*="VSbet" i]',
+  'img[alt*="Vivu88" i]',
+  'img[alt*="Rikvip" i]',
+  'img[alt*="Nhatvip" i]'
 ] as const;
 
 /**
@@ -105,6 +133,7 @@ export const ALL_COSMETIC_SELECTORS = [
   ...GLOBAL_AD_SELECTORS,
   ...VN_AD_SELECTORS
 ];
+
 
 /**
  * Danh sách selector chuyên biệt cho YouTube

@@ -53,4 +53,7 @@ export type MessageType =
   | { type: 'CANCEL_TEMP_PICKER'; tabId?: number }
   | { type: 'RESET_TEMP_HIDDEN'; tabId?: number }
   | { type: 'TOGGLE_COSMETIC'; enabled: boolean; tabId?: number }
-  | { type: 'GET_COSMETIC_STATUS'; tabId?: number };
+  | { type: 'GET_COSMETIC_STATUS'; tabId?: number }
+  | { type: 'GET_RULESETS' }
+  | { type: 'TOGGLE_RULESET'; rulesetId: string; enabled: boolean };
+

@@ -1,151 +1,259 @@
-# 📋 KẾ HOẠCH PHÁT TRIỂN BLOCKADS 2.0 (ROADMAP 7–8 TUẦN)
+# 🗺️ Kế Hoạch Triển Khai & Đặc Tả Kỹ Thuật Chống Bug / Code Smell — BlockAds 2.0 (ads-B)
 
-> **Mục tiêu:** Xây dựng extension chặn quảng cáo và trackers hiện đại, siêu nhẹ, tuân thủ nghiêm ngặt **Manifest V3** bằng **Declarative Net Request (DNR)**, hỗ trợ đa trình duyệt (Chrome, Firefox, Edge, Brave, Cốc Cốc) và tối ưu riêng cho thị trường Việt Nam.
-
----
-
-## 🏗️ Tổng Quan Kiến Trúc Kỹ Thuật
-
-- **Framework**: [WXT](https://wxt.dev/) (Vite-based Next-Gen Web Extension Framework) + TypeScript
-- **UI Popup / Options**: React 18 + Lucide Icons + Vanilla CSS (Glassmorphism & Dark Mode)
-- **Core Engine**:
-  - **Network Filtering**: Chrome Declarative Net Request (DNR) static + dynamic rules
-  - **Cosmetic Filtering**: CSS Injection Engine + Batched MutationObserver
-  - **Storage**: `chrome.storage.local` (persistent & fast sync)
-- **Kiểm thử**: Vitest (Unit & Integration tests) + `validate-rules.mjs`
+Tài liệu này vừa là lộ trình phát triển theo từng tuần, vừa là **Bản Thiết Kế Kỹ Thuật (Technical Blueprint)** quy định cách viết code chuẩn xác nhằm loại bỏ hoàn toàn các lỗi tiềm ẩn (Runtime Bugs) và mùi mã nguồn xấu (Code Smells) trong môi trường **Chrome Extension Manifest V3**.
 
 ---
 
-## 📅 Lộ Trình Chi Tiết Từng Tuần
+## 🛑 PHẦN 1: MA TRẬN PHÒNG CHỐNG BUG ĐẶC THÙ CỦA MANIFEST V3
 
-### ✅ TUẦN 1: Hoàn Thiện MVP Hiện Tại + Filter Thật (ĐÃ HOÀN THÀNH)
-- [x] **500 Ruleset Chuẩn DNR MV3**:
-  - `public/rules/ruleset-easylist.json`: 220 rules chặn ad networks toàn cầu (Google Ads, DoubleClick, Criteo, Taboola, Outbrain, PopAds...).
-  - `public/rules/ruleset-easyprivacy.json`: 160 rules chặn trackers & analytics (GA, FB Pixel, Hotjar, Clarity, TikTok Pixel...).
-  - `public/rules/ruleset-abpvn.json`: 120 rules tối ưu riêng cho Việt Nam (eClick, AmbientPlatform, Admicro, Ants, VietAd, 24h, Kenh14...).
-- [x] **Scripts Tự Động Hóa**:
-  - `scripts/build-rulesets.mjs`: Tải và chuyển đổi rules sang DNR JSON.
-  - `scripts/validate-rules.mjs`: Kiểm tra định dạng JSON và tính hợp lệ của rules.
-  - `scripts/generate-icons.mjs`: Sinh bộ icon PNG chuẩn (16, 32, 48, 128).
-- [x] **Badge Số Lượng Request Bị Chặn**:
-  - Theo dõi qua `getMatchedRules()` và `onRuleMatchedDebug`.
-  - Hiển thị badge màu đỏ (`#e74c3c`), tự động thu gọn `999+`, cập nhật badge theo tab active.
-- [x] **Whitelist Bền Vững & Dynamic Rules**:
-  - Lưu vào `chrome.storage.local`, đồng bộ sang DNR dynamic rules (`priority: 100`, action: `allow`).
-  - Nút thêm, xóa từng domain 🗑️ và xóa toàn bộ trong Popup.
-- [x] **Popup Giao Diện Dark Mode**:
-  - Tab Trạng thái: Domain hiện tại, công tắc Bật/Tắt bảo vệ tức thì, số lượng chặn hôm nay / tổng cộng.
-  - Tab Whitelist: Quản lý danh sách loại trừ.
-  - Tab Test 20 trang: Phím tắt mở nhanh 20 trang phổ biến (VnExpress, YouTube, Facebook, Dân Trí, 24h, Kênh 14...).
-- [x] **Kiểm Thử**:
-  - 11 Unit tests toàn diện với Vitest (`tests/unit/`) đạt 100% Pass.
-  - TypeScript strict mode compile 0 lỗi.
-- **Deliverable**: Đã đóng gói production bundle `.output/chrome-mv3` (~378 KB) sẵn sàng cài đặt.
+Dưới đây là 6 lỗi nghiêm trọng thường gặp nhất khi viết Adblocker trên Manifest V3 và giải pháp kỹ thuật bắt buộc để triệt tiêu chúng:
+
+| Mã Lỗi | Hiện tượng & Nguyên nhân gốc rễ | Giải pháp triển khai bắt buộc (Zero-Bug Pattern) |
+| :--- | :--- | :--- |
+| **BUG-01: Sập Service Worker trên Production do onRuleMatchedDebug** | Khi chạy `npm run dev` (Unpacked), sự kiện hoạt động bình thường. Khi đóng gói `.zip` phát hành, `onRuleMatchedDebug` trả về `undefined`, gọi `.addListener` trực tiếp gây lỗi `TypeError` làm sập toàn bộ Background Script. | 1. Kích hoạt `setExtensionActionOptions({ displayActionCountAsBadgeText: true })` làm cơ chế hiển thị Badge gốc trên Production.<br>2. Kết hợp `getMatchedRules({ tabId })` để lấy số liệu khi mở Popup.<br>3. Luôn bọc điều kiện `if (chrome.declarativeNetRequest?.onRuleMatchedDebug)` trước khi gắn listener debug. |
+| **BUG-02: Sai lệch thống kê do Race Condition khi tải trang** | Một trang báo chặn 40 quảng cáo cùng lúc. Nếu 40 sự kiện cùng gọi `await storage.get()` -> `+1` -> `await storage.set()`, các luồng đọc cùng giá trị cũ và ghi đè lên nhau khiến bộ đếm chỉ tăng 1–2 đơn vị. | Triển khai **Debounced Batcher + Promise Queue**: Gom toàn bộ số lượt tăng trong chu kỳ `250ms` vào biến bộ nhớ tạm `pendingIncrement`, sau đó mới thực hiện 1 giao dịch đọc-cộng-ghi duy nhất xuống `chrome.storage.local`. |
+| **BUG-03: Whitelist không mở khóa được tài nguyên bên thứ 3 (Third-Party)** | Đã bật Whitelist cho `vnexpress.net` nhưng khung video/quảng cáo từ domain đối tác (`admicro.vn`, `doubleclick.net`) nhúng trong trang vẫn bị chặn do Dynamic Rule chỉ dùng `urlFilter` khớp với tên miền chính. | Mỗi domain trong Whitelist phải sinh ra **1 cặp Dynamic Rules (`priority: 100`)**:<br>1. `allowAllRequests` cho `requestDomains: [domain]` ở cấp `main_frame`.<br>2. `allow` cho `initiatorDomains: [domain]` để cho phép mọi request bên thứ 3 xuất phát từ trang đó. |
+| **BUG-04: Xung đột ID khi cập nhật Dynamic Rules (Duplicate ID)** | Gọi `updateDynamicRules` bị văng ngoại lệ `Rule with id 10000 does not have a unique ID` khiến toàn bộ danh sách Whitelist ngừng hoạt động. | Trước khi thêm rule mới, luôn gọi `getDynamicRules()`, lọc toàn bộ ID nằm trong phân vùng Whitelist (`10000 <= id <= 19999`) đưa vào `removeRuleIds` cùng lúc với `addRules` trong **1 lệnh gọi nguyên tử duy nhất**. |
+| **BUG-05: Mất trạng thái khi Service Worker tự hủy sau 30s** | MV3 Service Worker tự động ngủ sau 30 giây không có sự kiện. Mọi biến toàn cục (`Map`, `Set`, `let count`) sẽ bị xóa sạch khi thức dậy. | Tuyệt đối không dùng biến toàn cục làm nguồn dữ liệu gốc (Source of Truth). Lưu danh sách Whitelist & Thống kê ngày vào `chrome.storage.local`, lưu bộ đếm tạm theo Tab vào `chrome.storage.session`. |
+| **BUG-06: Nhấp nháy giao diện (FOUC) & giật lag CPU khi cuộn trang** | Tiêm CSS ở `document_idle` làm khung quảng cáo hiện ra 1 giây rồi mới mất. Dùng `MutationObserver` quét DOM liên tục trên trang cuộn vô tận (Facebook, YouTube) gây treo tab. | Cấu hình Content Script ở `runAt: 'document_start'`. Sử dụng **Pure Declarative CSS Injection** (chèn 1 thẻ `<style>` duy nhất vào `document.documentElement`) để trình duyệt tự ẩn phần tử bằng C++ Layout Engine (`0% CPU`). |
 
 ---
 
-### ✅ TUẦN 2: Cosmetic Filtering Nâng Cao & Tối Ưu CSS (HOÀN THIỆN XUẤT SẮC)
-- [x] **Content Script Chuyên Dụng & Optimistic Anti-Flicker**:
-  - Tối ưu bộ Selector chuẩn xác 100% (Zero False-Positive): Loại bỏ hoàn toàn các wildcard nguy hiểm (`[class*="ad-container"]`, `[class*="ad-wrapper"]`, `[id*="-ad-"]`, `[class*="eclick"]`) nhằm tránh ẩn nhầm các container hệ thống (`load-container`, `upload-wrapper`, nút `oneclick-buy`, nút `azure-ad-login`).
-  - Phân tầng bộ lọc: Google GAM/DFP & AdSense (`ins.adsbygoogle`, `div[id^="google_ads_"]`, `div[id^="div-gpt-ad"]`), Semantic Ad Classes (`.ad-banner`, `.advertisement`), Mạng quảng cáo VN (`[id^="admicro-"]`, `[id^="eclick-"]`, `.quang-cao`, `.qc-banner`).
-  - Áp dụng kỹ thuật **Optimistic Injection**: Inject CSS ngay lập tức tại `document_start` để browser C++ engine ẩn quảng cáo trước khi kịp render, xóa bỏ hoàn toàn hiện tượng FOUC/giật màn hình; tự động gỡ bỏ nếu tab nằm trong Whitelist.
-- [x] **MutationObserver Tối Ưu Single-Pass**:
-  - Thay thế vòng lặp 50 lần `querySelectorAll` bằng 1 lần query đơn tổng hợp (`combinedSelector`), giảm 98% chi phí duyệt DOM trên các trang cuộn vô tận.
-  - Tối ưu hiệu năng: Debounce 100ms, chỉ observe `childList` trên `document.body`, bỏ qua text & attribute để giữ vững 60fps mượt mà.
-  - Tự động ngắt observer khi tab ở chế độ background (`visibilitychange`) và tự kết nối lại khi active.
-- [x] **Nút "Ẩn Phần Tử Này" Tạm Thời & Generator An Toàn**:
-  - Thêm nút vào Popup: Khi click, bật con trỏ chuột chọn phần tử trên trang.
-  - Thuật toán `generateSelector` an toàn: Escape class/ID đặc biệt bằng `CSS.escape`, xử lý đúng SVG AnimatedString và fallback tag name.
-- **Deliverable**: Đã hoàn thành và tối ưu `entrypoints/cosmetic.content.ts`, `src/content/cosmetic-engine.ts`, `src/content/element-picker.ts`, 20/20 unit tests passed.
+## 🧹 PHẦN 2: QUY CHUẨN LOẠI BỎ CODE SMELL & MẪU TRIỂN KHAI CHUẨN
+
+### 1. Bảng Đối Chiếu Chống Code Smell (Clean Code Rules)
+
+* ❌ **Smell 1 — Magic Numbers & Hardcoded Strings:** Viết trực tiếp các con số `100`, `999`, `'999+'`, `10000`, `'#e74c3c'` rải rác ở nhiều file.
+  * ✔️ **Cách khắc phục:** Tập trung toàn bộ vào `src/constants.ts` với kiểu `as const`.
+* ❌ **Smell 2 — Bóc tách URL/Domain bằng .split() hoặc Regex thủ công:** Dễ gây lỗi khi gặp URL chứa cổng (`localhost:3000`), chuỗi truy vấn phức tạp, hoặc trang hệ thống (`chrome://extensions`, `about:blank`).
+  * ✔️ **Cách khắc phục:** Sử dụng hàm thuần túy `extractNormalizedDomain()` trong `src/domain.ts` dựa trên chuẩn `new URL()` và kiểm tra giao thức hợp lệ (`http:` / `https:`).
+* ❌ **Smell 3 — God Entrypoint Files (Nhồi nhét logic vào UI/Background):** Viết hàng trăm dòng xử lý dữ liệu trực tiếp trong `entrypoints/popup/main.ts` hoặc `entrypoints/background.ts`.
+  * ✔️ **Cách khắc phục:** Các file trong `entrypoints/` chỉ làm nhiệm vụ điều phối sự kiện (Controller/Wiring) dưới 100 dòng. Toàn bộ nghiệp vụ nằm trong `src/` để kiểm thử độc lập bằng Vitest.
+* ❌ **Smell 4 — Silent Catch Blocks (Nuốt lỗi im lặng):** Dùng `try { ... } catch {}` trống rỗng không rõ lý do.
+  * ✔️ **Cách khắc phục:** Viết hàm bọc xử lý lỗi rõ ràng hoặc ghi chú cụ thể nguyên nhân bỏ qua (ví dụ: tab đã bị người dùng đóng trước khi kịp cập nhật Badge).
 
 ---
 
-### ⏳ TUẦN 3: Element Picker + Custom Filter
-- [ ] **Element Picker Nâng Cao**:
-  - Lớp phủ tương tác (Overlay) bằng **Shadow DOM** để không bị ảnh hưởng bởi CSS trang web.
-  - Highlight khối phần tử khi di chuột, hộp thoại xác nhận nổi với nút xem trước (Preview) và số lượng element khớp.
-  - Thuật toán tạo CSS selector tối ưu: Ưu tiên ID > semantic classes > data attributes > path ngắn nhất.
-- [ ] **Custom Filters Động (Cosmetic & Network)**:
-  - Cho phép người dùng tự viết rules theo cú pháp Adblock:
-    - Cosmetic: `domain.com##.custom-ad` hoặc `##.global-banner`
-    - Network: `||ads.domain.com^`
-  - Áp dụng ngay lập tức mà không cần khởi động lại trình duyệt (thông qua DNR dynamic rules và content script messaging).
-- [ ] **Trang Cài Đặt (Options Page)**:
-  - Xem, chỉnh sửa, xóa các custom filter và element đã ẩn.
-  - Tính năng Sao lưu (Export) và Khôi phục (Import) cấu hình dạng JSON/Text.
-- **Deliverable**: Người dùng có thể tự bấm ẩn bất kỳ phần tử nào trên bất kỳ website nào.
+### 2. Thiết Kế Module Chuẩn Hóa Trong `src/`
+
+#### 📌 Module 1: Quản lý Hằng số tập trung (`src/constants.ts`)
+    export const BADGE_CONFIG = {
+      ALERT_COLOR: '#e74c3c',
+      DISABLED_COLOR: '#7f8c8d',
+      MAX_DISPLAY_COUNT: 999,
+      OVERFLOW_TEXT: '999+',
+      DISABLED_TEXT: 'OFF',
+    } as const;
+
+    export const DNR_CONFIG = {
+      WHITELIST_PRIORITY: 100,
+      WHITELIST_RULE_ID_START: 10000,
+      WHITELIST_RULE_ID_END: 19999,
+      STATIC_RULESETS: ['easylist', 'easyprivacy', 'abpvn'] as const,
+    } as const;
+
+    export const STORAGE_KEYS = {
+      WHITELIST: 'whitelist',
+      STATS: 'stats',
+      ENABLED_RULESETS: 'enabledRulesets',
+    } as const;
+
+#### 📌 Module 2: Chuẩn hóa Domain an toàn (`src/domain.ts`)
+    const VALID_WEB_PROTOCOLS = new Set(['http:', 'https:']);
+
+    export function extractNormalizedDomain(input: string | undefined | null): string | null {
+      if (!input || typeof input !== 'string') return null;
+      const trimmed = input.trim().toLowerCase();
+      if (!trimmed) return null;
+
+      try {
+        const hasProtocol = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(trimmed);
+        const parsed = new URL(hasProtocol ? trimmed : `https://${trimmed}`);
+
+        if (!VALID_WEB_PROTOCOLS.has(parsed.protocol)) {
+          return null; // Bỏ qua chrome://, edge://, about:, file://
+        }
+
+        const cleanHost = parsed.hostname.replace(/^www\./, '');
+        return cleanHost.includes('.') || cleanHost === 'localhost' ? cleanHost : null;
+      } catch {
+        return null;
+      }
+    }
+
+    export function isDomainWhitelisted(hostname: string, whitelist: readonly string[]): boolean {
+      const target = extractNormalizedDomain(hostname);
+      if (!target) return false;
+
+      return whitelist.some((item) => {
+        const allowed = extractNormalizedDomain(item);
+        if (!allowed) return false;
+        return target === allowed || target.endsWith(`.${allowed}`);
+      });
+    }
+
+#### 📌 Module 3: Chống Race Condition khi ghi Storage (`src/storage.ts`)
+    import { BADGE_CONFIG } from './constants';
+
+    export interface BlockStats {
+      todayCount: number;
+      totalCount: number;
+      lastResetDate: string;
+    }
+
+    let pendingIncrement = 0;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let mutexChain: Promise<void> = Promise.resolve();
+
+    export function getTodayIsoString(): string {
+      return new Date().toISOString().slice(0, 10);
+    }
+
+    export function formatBadgeText(count: number): string {
+      if (count <= 0) return '';
+      return count > BADGE_CONFIG.MAX_DISPLAY_COUNT
+        ? BADGE_CONFIG.OVERFLOW_TEXT
+        : String(count);
+    }
+
+    // Gom nhóm các sự kiện chặn trong 250ms và ghi tuần tự qua Mutex Chain
+    export function queueStatIncrement(delta = 1): void {
+      if (delta <= 0) return;
+      pendingIncrement += delta;
+
+      if (!flushTimer) {
+        flushTimer = setTimeout(() => {
+          const amountToCommit = pendingIncrement;
+          pendingIncrement = 0;
+          flushTimer = null;
+          mutexChain = mutexChain.then(() => commitIncrementToStorage(amountToCommit));
+        }, 250);
+      }
+    }
+
+    async function commitIncrementToStorage(amount: number): Promise<void> {
+      const today = getTodayIsoString();
+      const data = await chrome.storage.local.get({
+        stats: { todayCount: 0, totalCount: 0, lastResetDate: today },
+      });
+
+      const current: BlockStats = data.stats;
+      const isNewDay = current.lastResetDate !== today;
+
+      const updated: BlockStats = {
+        todayCount: (isNewDay ? 0 : current.todayCount) + amount,
+        totalCount: current.totalCount + amount,
+        lastResetDate: today,
+      };
+
+      await chrome.storage.local.set({ stats: updated });
+    }
+
+#### 📌 Module 4: Đồng bộ nguyên tử Whitelist Dynamic Rules (`src/whitelist.ts`)
+    import { DNR_CONFIG } from './constants';
+    import { extractNormalizedDomain } from './domain';
+
+    export function buildWhitelistRules(domains: readonly string[]): chrome.declarativeNetRequest.Rule[] {
+      const uniqueDomains = Array.from(
+        new Set(domains.map(extractNormalizedDomain).filter((d): d is string => Boolean(d)))
+      );
+
+      const rules: chrome.declarativeNetRequest.Rule[] = [];
+
+      uniqueDomains.forEach((domain, idx) => {
+        const baseRuleId = DNR_CONFIG.WHITELIST_RULE_ID_START + idx * 2;
+
+        // Rule 1: Mở khóa toàn bộ tài nguyên thuộc trang chính
+        rules.push({
+          id: baseRuleId,
+          priority: DNR_CONFIG.WHITELIST_PRIORITY,
+          action: { type: 'allowAllRequests' as chrome.declarativeNetRequest.RuleActionType },
+          condition: {
+            requestDomains: [domain],
+            resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType],
+          },
+        });
+
+        // Rule 2: Mở khóa toàn bộ request bên thứ 3 xuất phát từ domain này
+        rules.push({
+          id: baseRuleId + 1,
+          priority: DNR_CONFIG.WHITELIST_PRIORITY,
+          action: { type: 'allow' as chrome.declarativeNetRequest.RuleActionType },
+          condition: {
+            initiatorDomains: [domain],
+          },
+        });
+      });
+
+      return rules;
+    }
+
+    export async function syncWhitelistDynamicRules(whitelist: readonly string[]): Promise<void> {
+      const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+
+      // Chỉ xóa các ID nằm trong dải dành riêng cho Whitelist (10000 - 19999)
+      const removeRuleIds = existingRules
+        .filter(
+          (r) =>
+            r.id >= DNR_CONFIG.WHITELIST_RULE_ID_START &&
+            r.id <= DNR_CONFIG.WHITELIST_RULE_ID_END
+        )
+        .map((r) => r.id);
+
+      const addRules = buildWhitelistRules(whitelist);
+
+      await chrome.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds,
+        addRules,
+      });
+    }
 
 ---
 
-### ⏳ TUẦN 4: YouTube Mode + Scriptlets Cơ Bản
-- [ ] **Network Rules Riêng Cho YouTube**:
-  - Tạo `ruleset-youtube.json` chặn các domain quảng cáo và tracking video (`googlevideo.com` ad-streams, `youtube.com/api/stats/ads`, `doubleclick.net`).
-- [ ] **Content Script & Scriptlet Chuyên Sâu Cho YouTube**:
-  - Xóa các container quảng cáo: `.video-ads`, `.ytp-ad-module`, `#player-ads`, `ytd-ad-slot-renderer`.
-  - Ẩn popup cảnh báo: "Ad blockers are not allowed on YouTube" (`yt-playability-error-supported-renderers`).
-  - Cơ chế tự động bỏ qua video ad: Bắt sự kiện video ad, tăng tốc độ phát (`playbackRate = 16`), tắt âm thanh ad tạm thời, và tự động click nút Skip Ad khi xuất hiện.
-- [ ] **Chế Độ YouTube Riêng Biệt Trong Popup**:
-  - Công tắc bật/tắt YouTube Mode độc lập để linh hoạt xử lý nếu YouTube thay đổi thuật toán.
-- **Deliverable**: Trải nghiệm xem video trên YouTube mượt mà, giảm ads rõ rệt.
+## 📅 PHẦN 3: LỘ TRÌNH PHÁT TRIỂN CHI TIẾT 4 GIAI ĐOẠN
+
+### ✅ Giai Đoạn 1 (Tuần 1): Xây Dựng Nền Tảng & Adblock MVP — [HOÀN THÀNH]
+- [x] Khởi tạo kiến trúc dự án với **WXT Framework**, **TypeScript** và **Vitest**.
+- [x] Xây dựng 3 bộ lọc tĩnh chuẩn MV3 với tổng cộng **500 rules**:
+  - [x] `ruleset-easylist.json` (220 rules chặn mạng quảng cáo quốc tế).
+  - [x] `ruleset-easyprivacy.json` (160 rules chặn trackers & analytics).
+  - [x] `ruleset-abpvn.json` (120 rules tối ưu cho báo điện tử và website Việt Nam).
+- [x] Viết công cụ tự động hóa `npm run build:rules` và `npm run validate:rules`.
+- [x] Xây dựng cơ chế Whitelist lưu trữ bền vững trong `chrome.storage.local` và đồng bộ sang Dynamic Rules (`priority: 100`, `action: allow`).
+- [x] Thiết kế giao diện **Popup Dark Mode** hiện đại, tích hợp tab **"Test 20 trang"** và hiển thị Badge `#e74c3c` (`999+`).
+
+### ✅ Giai Đoạn 2 (Tuần 2): Lọc Thẩm Mỹ (Cosmetic Filtering) & Kiểm Thử — [HOÀN THÀNH]
+- [x] Triển khai hệ thống tiêm CSS ẩn khung quảng cáo rỗng qua Content Scripts ở thời điểm `document_start`.
+- [x] Phân tách rõ ràng 2 nhóm CSS Selectors: Generic Selectors và Site-Specific Selectors cho các trang báo Việt Nam (VnExpress, Dân Trí, Kênh 14, 24h, Tuổi Trẻ, ...).
+- [x] Tự động tắt bộ lọc thẩm mỹ trên các trang được đưa vào danh sách Whitelist.
+- [x] Viết bộ **Unit Tests** toàn diện trong `tests/unit/` kiểm tra logic chuẩn hóa domain, sinh rule động, định dạng badge và quản lý storage.
+
+### ✅ Giai Đoạn 3 (Tuần 3): Tái Cấu Trúc Clean Code & Chuẩn Hóa Production — [HOÀN THÀNH XUẤT SẮC]
+- [x] **Chuẩn hóa kiến trúc chống Code Smell:**
+  - [x] Tách `src/constants.ts` và `src/domain.ts`, xóa bỏ hoàn toàn Magic Numbers và các đoạn cắt chuỗi URL thủ công.
+  - [x] Nâng cấp `src/storage.ts` với cơ chế `queueStatIncrement` chống Race Condition (**BUG-02**).
+- [x] **Chuẩn hóa bộ đếm Badge cho môi trường Production (**BUG-01**):**
+  - [x] Bật `setExtensionActionOptions({ displayActionCountAsBadgeText: true })`.
+  - [x] Tích hợp `getMatchedRules` đồng bộ số liệu khi mở Popup, giữ `onRuleMatchedDebug` có kiểm tra điều kiện an toàn.
+- [x] **Nâng cấp Whitelist 2 lớp (**BUG-03** & **BUG-04**):**
+  - [x] Áp dụng cặp quy tắc `allowAllRequests` (`main_frame`) + `allow` (`initiatorDomains`) và đồng bộ nguyên tử theo dải ID `10000–19999`.
+- [x] **Quản lý Bật/Tắt từng bộ lọc trên Popup:** Cho phép người dùng bật/tắt độc lập từng bộ lọc (`EasyList`, `EasyPrivacy`, `ABPVN`) qua `updateEnabledRulesets`.
+- [x] **Tính năng chọn phần tử thủ công (Element Picker):** Cho phép người dùng click trực tiếp vào vùng quảng cáo trên trang để tạo quy tắc ẩn CSS cá nhân.
+
+
+### 🚀 Giai Đoạn 4 (Tuần 4): Mở Rộng 30.000+ Rules, CI/CD & Phát Hành — [DỰ KIẾN]
+- [ ] **Mở rộng quy mô Ruleset (30.000+ Static Rules):** Nâng cấp `scripts/build-rules.mjs` tự động tải và biên dịch trực tiếp từ danh sách gốc của EasyList, EasyPrivacy và ABPVN.
+- [ ] **Xây dựng trang Options Page nâng cao:** Hỗ trợ Import/Export danh sách Whitelist & quy tắc ẩn CSS cá nhân ra file `.json`, kèm biểu đồ thống kê theo tuần.
+- [ ] **Thiết lập GitHub Actions CI/CD (`.github/workflows/ci.yml`):** Tự động chạy kiểm tra TypeScript, xác thực JSON ruleset và chạy Vitest trên mọi Commit / Pull Request.
+- [ ] **Đóng gói và Phát hành (Release `v1.0.0`):** Xuất bản gói `.zip` chuẩn hóa lên mục **GitHub Releases** và Chrome Web Store.
 
 ---
 
-### ⏳ TUẦN 5: Tối Ưu Hiệu Năng + Thống Kê Chi Tiết + UX
-- [ ] **Bảng Thống Kê Chuyên Sâu (Analytics Dashboard)**:
-  - Biểu đồ thống kê số lượng chặn theo thời gian (hôm nay, 7 ngày qua, tổng cộng).
-  - Top 5 tên miền quảng cáo & tracker bị chặn nhiều nhất.
-  - Ước tính dung lượng mạng (MB) và thời gian load trang (giây) tiết kiệm được.
-- [ ] **Tối Ưu Hiệu Năng Toàn Diện**:
-  - Cache các compiled regex và CSS selectors.
-  - Chuyển các tác vụ nặng sang `requestIdleCallback`.
-  - Đảm bảo thời gian mở Popup < 150ms, RAM chiếm dụng của background worker < 30MB.
-- [ ] **Xử Lý Lỗi Chặn Nhầm (False Positive)**:
-  - Nút "Báo cáo trang web bị lỗi" trực tiếp trên Popup.
-  - Cơ chế 1-click để vô hiệu hóa tạm thời cosmetic filtering nếu trang web bị vỡ giao diện.
-- **Deliverable**: Extension hoạt động cực nhẹ, giao diện trực quan và chuyên nghiệp.
+## ✔️ PHẦN 4: CỔNG KIỂM SOÁT CHẤT LƯỢNG TRƯỚC KHI COMMIT (PRE-COMMIT QUALITY GATE)
 
----
+Trước khi thực hiện bất kỳ lệnh `git commit` nào, toàn bộ 4 câu lệnh kiểm định dưới đây bắt buộc phải vượt qua với trạng thái **PASS (0 lỗi)**:
 
-### ⏳ TUẦN 6: Hỗ Trợ Đa Trình Duyệt + Đóng Gói Lên Store
-- [ ] **Hỗ Trợ Firefox (Gecko MV3)**:
-  - Cấu hình WXT build target Firefox (`wxt build -b firefox`).
-  - Thêm `browser_specific_settings.gecko.id` trong manifest.
-  - Kiểm thử tính tương thích của Declarative Net Request trên Firefox.
-- [ ] **Hỗ Trợ Microsoft Edge & Trình Duyệt Chromium**:
-  - Kiểm thử tương thích trên MS Edge, Brave, Cốc Cốc.
-- [ ] **Đóng Gói & Chuẩn Bị Store**:
-  - Thiết kế bộ Asset Store: Promo tile (440x280), Marquee (1400x560), Screenshots (1280x800).
-  - Soạn thảo mô tả Store tối ưu SEO (Tiếng Việt & Tiếng Anh).
-  - Viết tài liệu **Chính sách quyền riêng tư (Privacy Policy)** cam kết Zero Data Collection (100% dữ liệu xử lý local).
-- **Deliverable**: Sẵn sàng nộp hồ sơ phát hành lên Chrome Web Store và Firefox Add-ons.
-
----
-
-### ⏳ TUẦN 7–8: Bảo Trì & Tính Năng Nâng Cao
-- [ ] **Hệ Thống Tự Động Cập Nhật Ruleset**:
-  - Kiểm tra và tự cập nhật ruleset mới định kỳ 24–48 giờ từ GitHub/CDN mà không cần cập nhật toàn bộ extension.
-- [ ] **Thư Viện Scriptlets Chống Anti-Adblock**:
-  - Giả lập các đối tượng chặn phổ biến (`window.adsbygoogle`, fake `canRunAds = true`).
-  - Chống các thư viện phát hiện chặn ad (FuckAdBlock, BlockAdBlock, Admiral, PageFair).
-- [ ] **Chế Độ Basic / Advanced**:
-  - *Basic Mode*: Chỉ sử dụng DNR tĩnh, không can thiệp script, siêu tiết kiệm pin.
-  - *Advanced Mode*: Đầy đủ Cosmetic, Scriptlets, Element Picker và YouTube booster.
-- **Deliverable**: Sản phẩm hoàn thiện cao cấp, có cộng đồng và khả năng tự duy trì lâu dài.
-
----
-
-## 📊 Bảng Theo Dõi Tiến Độ
-
-| Tuần | Hạng mục chính | Trạng thái | Ghi chú |
-| :--- | :--- | :---: | :--- |
-| **Tuần 1** | Hoàn thiện MVP + 500 rules DNR + Badge + Whitelist | **Hoàn thành** | Đã pass 11/11 tests, build Chrome MV3 sẵn sàng |
-| **Tuần 2** | Cosmetic Filtering + MutationObserver | **Hoàn thành** | Đã tối ưu CSS triệt để, pass 20/20 tests, zero false-positive |
-| **Tuần 3** | Element Picker + Custom Filters + Options | Dự kiến | |
-| **Tuần 4** | YouTube Ad-Skipper & Scriptlets | Dự kiến | |
-| **Tuần 5** | Thống kê nâng cao + Tối ưu hiệu năng + UX | Dự kiến | |
-| **Tuần 6** | Đa trình duyệt (Firefox, Edge) + Submit Store | Dự kiến | |
-| **Tuần 7-8**| Auto-update rules + Chống Anti-adblock | Dự kiến | |
-
----
-
-*Tài liệu này được cập nhật liên tục theo tiến độ thực tế của dự án.*
+    npm run compile
+    npm run validate:rules
+    npm test
+    npm run build

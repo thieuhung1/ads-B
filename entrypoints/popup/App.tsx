@@ -12,9 +12,20 @@ import {
   CheckCircle2,
   MousePointerClick,
   Undo2,
-  Sparkles
+  Sparkles,
+  Sliders,
+  ToggleLeft,
+  ToggleRight
 } from 'lucide-react';
 import type { TabState, BlockStats, WhitelistEntry } from '../../src/shared/types';
+
+interface RulesetItem {
+  id: string;
+  name: string;
+  description: string;
+  rulesCount: number;
+  enabled: boolean;
+}
 
 const TEST_SITES = [
   { name: 'VnExpress', domain: 'vnexpress.net' },
@@ -48,8 +59,9 @@ export default function App() {
     byDomain: {}
   });
   const [whitelist, setWhitelist] = useState<WhitelistEntry[]>([]);
+  const [rulesets, setRulesets] = useState<RulesetItem[]>([]);
   const [newDomain, setNewDomain] = useState('');
-  const [activeTab, setActiveTab] = useState<'status' | 'cosmetic' | 'whitelist' | 'test'>('status');
+  const [activeTab, setActiveTab] = useState<'status' | 'rulesets' | 'cosmetic' | 'whitelist' | 'test'>('status');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [tempHiddenCount, setTempHiddenCount] = useState<number>(0);
 
@@ -67,6 +79,12 @@ export default function App() {
         setWhitelist(response.whitelist);
       }
 
+      // Lấy danh sách bộ lọc
+      const rulesetRes = await chrome.runtime.sendMessage({ type: 'GET_RULESETS' });
+      if (rulesetRes?.success) {
+        setRulesets(rulesetRes.rulesets);
+      }
+
       // Lấy trạng thái cosmetic filtering từ content script
       const cosmeticRes = await chrome.runtime.sendMessage({ type: 'GET_COSMETIC_STATUS' });
       if (cosmeticRes?.success) {
@@ -79,7 +97,7 @@ export default function App() {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 2000);
+    const interval = setInterval(loadData, 2500);
     return () => clearInterval(interval);
   }, []);
 
@@ -98,35 +116,41 @@ export default function App() {
     }
   };
 
+  const handleToggleRuleset = async (rulesetId: string, currentEnabled: boolean) => {
+    const nextState = !currentEnabled;
+    const res = await chrome.runtime.sendMessage({
+      type: 'TOGGLE_RULESET',
+      rulesetId,
+      enabled: nextState
+    });
+    if (res?.success) {
+      setRulesets(prev => prev.map(r => r.id === rulesetId ? { ...r, enabled: nextState } : r));
+      showToast(`${nextState ? 'Đã bật' : 'Đã tắt'} bộ lọc ${rulesetId.replace('ruleset_', '')}`);
+    }
+  };
+
   const handleStartElementPicker = async () => {
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'START_TEMP_PICKER' });
-      if (res?.success) {
-        // Đóng popup để người dùng tương tác ngay với trang web
-        window.close();
-      } else {
-        showToast(res?.error || 'Không thể kích hoạt picker');
-      }
-    } catch {
-      showToast('Không thể kết nối tới trang này');
+    const res = await chrome.runtime.sendMessage({ type: 'START_TEMP_PICKER' });
+    if (res?.success) {
+      showToast('Đã kích hoạt con trỏ chọn phần tử!');
+      window.close(); // Đóng popup để người dùng tương tác trực tiếp trên trang web
+    } else {
+      showToast(res?.error || 'Không thể kích hoạt picker');
     }
   };
 
   const handleResetTempHidden = async () => {
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'RESET_TEMP_HIDDEN' });
-      if (res?.success) {
-        setTempHiddenCount(0);
-        showToast('Đã khôi phục các phần tử ẩn');
-      }
-    } catch {
-      showToast('Không thể kết nối tới trang');
+    const res = await chrome.runtime.sendMessage({ type: 'RESET_TEMP_HIDDEN' });
+    if (res?.success) {
+      setTempHiddenCount(0);
+      showToast('Đã khôi phục các phần tử ẩn');
     }
   };
 
   const handleAddWhitelist = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newDomain.trim()) return;
+
     const res = await chrome.runtime.sendMessage({
       type: 'ADD_WHITELIST',
       domain: newDomain.trim()
@@ -134,7 +158,7 @@ export default function App() {
     if (res?.success) {
       setWhitelist(res.whitelist);
       setNewDomain('');
-      showToast(`Đã thêm ${newDomain.trim()} vào Whitelist`);
+      showToast(`Đã thêm vào Whitelist`);
       loadData();
     }
   };
@@ -181,7 +205,7 @@ export default function App() {
           <div>
             <div className="header-title-row">
               <h1 className="header-title">BlockAds 2.0</h1>
-              <span className="badge-tag">v2.0</span>
+              <span className="badge-tag">ads-B</span>
             </div>
             <p className="header-subtitle">
               {isProtected ? 'Bảo vệ đang hoạt động' : 'Tạm dừng bảo vệ trang này'}
@@ -200,6 +224,12 @@ export default function App() {
           onClick={() => setActiveTab('status')}
         >
           Trạng thái
+        </button>
+        <button
+          className={`tab-btn ${activeTab === 'rulesets' ? 'active' : ''}`}
+          onClick={() => setActiveTab('rulesets')}
+        >
+          Bộ lọc ({rulesets.filter(r => r.enabled).length}/{rulesets.length || 3})
         </button>
         <button
           className={`tab-btn ${activeTab === 'cosmetic' ? 'active' : ''}`}
@@ -291,7 +321,7 @@ export default function App() {
           <div className="card rulesets-card">
             <div className="rulesets-header">
               <span className="rulesets-title">Bộ lọc quy tắc DNR & Cosmetic</span>
-              <span className="rulesets-count">500 DNR + CSS</span>
+              <span className="rulesets-count">500+ DNR Rules</span>
             </div>
             <div className="ruleset-items">
               <div className="ruleset-pill">
@@ -300,27 +330,60 @@ export default function App() {
               </div>
               <div className="ruleset-pill">
                 <CheckCircle2 size={13} className="pill-check" />
-                <span>MutationObserver: <strong>Bắt quảng cáo động</strong></span>
+                <span>Clean Architecture: <strong>Không Race Condition & 0% CPU</strong></span>
               </div>
               <div className="ruleset-pill">
                 <CheckCircle2 size={13} className="pill-check" />
-                <span>DNR Rules: <strong>500 rules (EasyList, Privacy, ABPVN)</strong></span>
+                <span>Dynamic Whitelist: <strong>Đồng bộ nguyên tử 10000-19999</strong></span>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* TAB 2: COSMETIC FILTERING CONTROLS */}
+      {/* TAB 2: RULESETS MANAGEMENT */}
+      {activeTab === 'rulesets' && (
+        <div className="tab-content">
+          <div className="rulesets-management">
+            <div className="ruleset-intro">
+              <Sliders size={18} className="intro-icon" />
+              <p>Bật hoặc tắt độc lập từng bộ lọc quy tắc tĩnh Declarative Net Request:</p>
+            </div>
+
+            <div className="ruleset-cards-list">
+              {rulesets.map((r) => (
+                <div key={r.id} className={`ruleset-card ${r.enabled ? 'ruleset-enabled' : 'ruleset-disabled'}`}>
+                  <div className="ruleset-card-info">
+                    <div className="ruleset-card-title-row">
+                      <span className="ruleset-card-title">{r.name}</span>
+                      <span className="ruleset-badge-count">{r.rulesCount} rules</span>
+                    </div>
+                    <p className="ruleset-card-desc">{r.description}</p>
+                  </div>
+                  <button
+                    className={`ruleset-toggle-btn ${r.enabled ? 'active' : ''}`}
+                    onClick={() => handleToggleRuleset(r.id, r.enabled)}
+                    title={r.enabled ? 'Tắt bộ lọc này' : 'Bật bộ lọc này'}
+                  >
+                    {r.enabled ? <ToggleRight size={28} className="toggle-icon-on" /> : <ToggleLeft size={28} className="toggle-icon-off" />}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 3: COSMETIC FILTERING CONTROLS */}
       {activeTab === 'cosmetic' && (
         <div className="tab-content">
           <div className="card cosmetic-card">
             <div className="cosmetic-card-header">
               <Sparkles size={20} className="cosmetic-icon" />
               <div>
-                <h3 className="cosmetic-title">Cosmetic Filtering</h3>
+                <h3 className="cosmetic-title">Cosmetic Filtering (Lọc Thẩm Mỹ)</h3>
                 <p className="cosmetic-desc">
-                  Ẩn sạch sẽ các banner, khung rỗng và khoảng trống quảng cáo còn sót lại bằng CSS Injection.
+                  Ẩn sạch sẽ các banner, khung rỗng và khoảng trống quảng cáo còn sót lại bằng Pure Declarative CSS Injection.
                 </p>
               </div>
             </div>
@@ -346,7 +409,7 @@ export default function App() {
         </div>
       )}
 
-      {/* TAB 3: WHITELIST MANAGER */}
+      {/* TAB 4: WHITELIST MANAGER */}
       {activeTab === 'whitelist' && (
         <div className="tab-content">
           <form className="add-whitelist-form" onSubmit={handleAddWhitelist}>
@@ -378,21 +441,19 @@ export default function App() {
               <div className="empty-state">
                 <ShieldCheck size={28} className="empty-icon" />
                 <p>Danh sách loại trừ đang trống.</p>
-                <small>Toàn bộ bộ lọc đang được áp dụng đầy đủ.</small>
+                <span className="empty-subtext">Mọi trang web đều được bảo vệ toàn diện</span>
               </div>
             ) : (
               whitelist.map((item) => (
                 <div key={item.domain} className="whitelist-item">
                   <div className="whitelist-domain-info">
+                    <Globe size={14} className="whitelist-globe" />
                     <span className="whitelist-domain-name">{item.domain}</span>
-                    <span className="whitelist-date">
-                      {new Date(item.addedAt).toLocaleDateString('vi-VN')}
-                    </span>
                   </div>
                   <button
-                    className="delete-item-btn"
+                    className="delete-btn"
                     onClick={() => handleRemoveWhitelist(item.domain)}
-                    title={`Xóa ${item.domain} khỏi Whitelist`}
+                    title="Xóa khỏi danh sách"
                   >
                     <Trash2 size={14} />
                   </button>
@@ -403,11 +464,11 @@ export default function App() {
         </div>
       )}
 
-      {/* TAB 4: TEST 20 TRANG PHỔ BIẾN */}
+      {/* TAB 5: TEST 20 POPULAR SITES */}
       {activeTab === 'test' && (
         <div className="tab-content">
-          <div className="test-intro">
-            Kiểm tra hiệu quả chặn quảng cáo và cosmetic filtering trên 20 website:
+          <div className="test-header">
+            <span>Click để mở và kiểm thử khả năng chặn quảng cáo:</span>
           </div>
           <div className="test-sites-grid">
             {TEST_SITES.map((site) => (
@@ -416,8 +477,8 @@ export default function App() {
                 className="test-site-btn"
                 onClick={() => openTestSite(site.domain)}
               >
-                <span className="test-site-name">{site.name}</span>
-                <ExternalLink size={12} className="test-site-ext" />
+                <span className="site-name">{site.name}</span>
+                <ExternalLink size={12} className="external-icon" />
               </button>
             ))}
           </div>
@@ -426,7 +487,11 @@ export default function App() {
 
       {/* Footer */}
       <footer className="footer">
-        <span>BlockAds 2.0 • DNR + Cosmetic Engine</span>
+        <div className="footer-left">
+          <span className="footer-status-indicator"></span>
+          <span>DNR + Cosmetic Engine</span>
+        </div>
+        <span className="footer-version">v2.0 (Clean Architecture)</span>
       </footer>
     </div>
   );

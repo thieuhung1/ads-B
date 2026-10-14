@@ -1,13 +1,26 @@
 import { defineBackground } from 'wxt/utils/define-background';
 import { WhitelistManager } from '../src/background/whitelist-manager';
 import { StatsManager } from '../src/background/stats-manager';
+import { DNR_CONFIG, RULESET_METADATA } from '../src/constants';
+import { getEnabledRulesets, setEnabledRulesets } from '../src/storage';
 import type { MessageType, TabState } from '../src/shared/types';
 
 export default defineBackground(() => {
   const whitelistManager = WhitelistManager.getInstance();
   const statsManager = StatsManager.getInstance();
 
-  console.log('[BlockAds 2.0] Service Worker khởi động thành công.');
+  console.log('[BlockAds 2.0] Service Worker khởi động (Manifest V3 Clean Architecture).');
+
+  // BUG-01 Fix: Bật cơ chế đếm Badge gốc trên Production nếu trình duyệt hỗ trợ
+  try {
+    if (chrome.declarativeNetRequest?.setExtensionActionOptions) {
+      chrome.declarativeNetRequest.setExtensionActionOptions({
+        displayActionCountAsBadgeText: true
+      });
+    }
+  } catch {
+    // Không hỗ trợ trên một số bản Chromium cũ
+  }
 
   // Khởi tạo và đồng bộ dynamic rules
   chrome.runtime.onInstalled.addListener(async (details) => {
@@ -19,7 +32,7 @@ export default defineBackground(() => {
     await whitelistManager.syncDynamicRules();
   });
 
-  // Lắng nghe sự kiện matched rule khi có declarativeNetRequestFeedback (unpacked dev mode)
+  // BUG-01 Fix: Chỉ gắn listener onRuleMatchedDebug khi API tồn tại (Unpacked dev mode)
   if (chrome.declarativeNetRequest?.onRuleMatchedDebug) {
     chrome.declarativeNetRequest.onRuleMatchedDebug.addListener((info) => {
       const tabId = info.request?.tabId;
@@ -29,35 +42,8 @@ export default defineBackground(() => {
     });
   }
 
-  // Polling định kỳ bằng getMatchedRules để đảm bảo badge luôn chính xác
-  let lastMatchedCount = 0;
-  async function pollMatchedRules() {
-    try {
-      if (chrome.declarativeNetRequest?.getMatchedRules) {
-        const result = await chrome.declarativeNetRequest.getMatchedRules({});
-        const currentCount = result.rulesMatchedInfo?.length || 0;
-        if (currentCount > lastMatchedCount) {
-          const diff = currentCount - lastMatchedCount;
-          lastMatchedCount = currentCount;
-
-          // Lấy active tab hiện tại để cập nhật
-          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (activeTab?.id) {
-            for (let i = 0; i < diff; i++) {
-              await statsManager.recordBlock(activeTab.id);
-            }
-          }
-        }
-      }
-    } catch {
-      // Ignored
-    }
-  }
-
-  setInterval(pollMatchedRules, 3000);
-
-  // Quản lý Tabs
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Quản lý vòng đời Tabs
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status === 'loading' && changeInfo.url) {
       statsManager.resetTab(tabId);
     }
@@ -88,14 +74,28 @@ export default defineBackground(() => {
             try {
               currentTab = await chrome.tabs.get(tabId);
             } catch {
-              // Tab not found
+              // Tab có thể đã đóng
             }
           }
 
           const rawUrl = sender.url || currentTab?.url || '';
           const domain = whitelistManager.normalizeDomain(rawUrl);
           const isWhitelisted = domain ? await whitelistManager.isWhitelisted(domain) : false;
-          const blockedCount = tabId ? statsManager.getTabBlockedCount(tabId) : 0;
+
+          // BUG-01: Lấy số liệu chính xác từ getMatchedRules khi mở Popup nếu khả dụng
+          let blockedCount = tabId ? statsManager.getTabBlockedCount(tabId) : 0;
+          if (tabId && chrome.declarativeNetRequest?.getMatchedRules) {
+            try {
+              const matched = await chrome.declarativeNetRequest.getMatchedRules({ tabId });
+              const matchedTotal = matched.rulesMatchedInfo?.length || 0;
+              if (matchedTotal > blockedCount) {
+                blockedCount = matchedTotal;
+                await statsManager.updateTabBadge(tabId, blockedCount);
+              }
+            } catch {
+              // Ignored
+            }
+          }
 
           const tabState: TabState = {
             tabId: tabId || 0,
@@ -121,7 +121,7 @@ export default defineBackground(() => {
           }
           const isWhitelisted = await whitelistManager.isWhitelisted(domain);
 
-          // Thông báo cho content script của active tab biết để bật/tắt cosmetic CSS
+          // Thông báo cho content script của active tab
           const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
           if (activeTab?.id) {
             try {
@@ -130,11 +130,43 @@ export default defineBackground(() => {
                 enabled: !isWhitelisted
               });
             } catch {
-              // Content script might not be injected yet
+              // Content script chưa được nạp
             }
           }
 
           sendResponse({ success: true, isWhitelisted });
+          break;
+        }
+
+        case 'GET_RULESETS': {
+          const enabledList = await getEnabledRulesets();
+          const rulesets = Object.values(RULESET_METADATA).map(r => ({
+            ...r,
+            enabled: enabledList.includes(r.id)
+          }));
+          sendResponse({ success: true, rulesets });
+          break;
+        }
+
+        case 'TOGGLE_RULESET': {
+          const { rulesetId, enabled } = message;
+          const current = await getEnabledRulesets();
+          let updated: string[];
+
+          if (enabled) {
+            updated = Array.from(new Set([...current, rulesetId]));
+            await chrome.declarativeNetRequest.updateEnabledRulesets({
+              enableRulesetIds: [rulesetId]
+            });
+          } else {
+            updated = current.filter(id => id !== rulesetId);
+            await chrome.declarativeNetRequest.updateEnabledRulesets({
+              disableRulesetIds: [rulesetId]
+            });
+          }
+
+          await setEnabledRulesets(updated);
+          sendResponse({ success: true, enabledRulesets: updated });
           break;
         }
 
@@ -144,8 +176,8 @@ export default defineBackground(() => {
             try {
               const res = await chrome.tabs.sendMessage(activeTab.id, { type: 'START_TEMP_PICKER' });
               sendResponse(res || { success: true });
-            } catch (err: any) {
-              sendResponse({ success: false, error: 'Không thể kích hoạt picker trên tab này (có thể là trang nội bộ trình duyệt).' });
+            } catch {
+              sendResponse({ success: false, error: 'Không thể kích hoạt picker trên tab này.' });
             }
           } else {
             sendResponse({ success: false, error: 'Không tìm thấy tab đang mở.' });

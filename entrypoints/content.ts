@@ -7,60 +7,84 @@ import { ElementPicker } from '../src/content/element-picker';
 
 const STYLE_ELEMENT_ID = 'blockads-cosmetic-style';
 
-// 1. Vô hiệu hóa trình kiểm tra Anti-Adblock trong trang (Giả lập Google Ads luôn tải thành công)
-function injectAntiAdblockDefuser(): void {
-  try {
-    const script = document.createElement('script');
-    script.textContent = `
-      (function() {
-        window.canRunAds = true;
-        window.isAdBlockActive = false;
-        window.google_ad_status = 1;
-        var dummy = { loaded: true, push: function() { return 1; } };
-        try {
-          Object.defineProperty(window, 'adsbygoogle', {
-            get: function() { return dummy; },
-            set: function() {},
-            configurable: true
-          });
-        } catch (e) {
-          window.adsbygoogle = dummy;
-        }
-      })();
-    `;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove();
-  } catch {
-    // Bỏ qua nếu CSP của trang chặn inline script
-  }
-}
-
-// 2. Ẩn phần tử cờ bạc an toàn không để lại khoảng trống
 function collapseAdElement(el: HTMLElement | null): void {
   if (!el || el.dataset.blockadsCleaned === '1') return;
-  // Tuyệt đối không bao giờ ẩn nhầm khung chứa trình phát video chính
-  if (el.querySelector('video, #player, #media-player, .jwplayer')) return;
+  if (el.tagName === 'VIDEO' || el.querySelector('video')) return;
 
   el.dataset.blockadsCleaned = '1';
   el.style.setProperty('display', 'none', 'important');
   el.style.setProperty('visibility', 'hidden', 'important');
+  el.style.setProperty('opacity', '0', 'important');
   el.style.setProperty('height', '0px', 'important');
   el.style.setProperty('max-height', '0px', 'important');
+  el.style.setProperty('width', '0px', 'important');
   el.style.setProperty('margin', '0px', 'important');
   el.style.setProperty('padding', '0px', 'important');
-  el.style.setProperty('overflow', 'hidden', 'important');
   el.style.setProperty('pointer-events', 'none', 'important');
+  el.style.setProperty('z-index', '-9999', 'important');
 }
 
 function isSafeSocialUrl(href: string): boolean {
   return SAFE_EXTERNAL_DOMAINS.some((domain) => href.includes(domain));
 }
 
+function isAdCloseButtonText(text: string): boolean {
+  const clean = text.trim().toLowerCase();
+  return (
+    clean === 'đóng quảng cáo' ||
+    clean === 'đóng và xem tiếp' ||
+    clean === 'bỏ qua quảng cáo' ||
+    clean === 'skip ad'
+  );
+}
+
+// Tự động tìm và ẩn lớp phủ chứa nút "Đóng quảng cáo" / "Đóng và xem tiếp" trên trình phát video
+function removeInPlayerAdOverlay(): void {
+  const elements = document.querySelectorAll<HTMLElement>(
+    'button, a, div, span'
+  );
+
+  elements.forEach((el) => {
+    if (el.dataset.blockadsCleaned === '1') return;
+    const text = (el.textContent || '').trim();
+    if (!isAdCloseButtonText(text)) return;
+
+    if (el instanceof HTMLAnchorElement) {
+      el.removeAttribute('href');
+      el.removeAttribute('target');
+    }
+
+    let overlayContainer: HTMLElement | null = el;
+    let parent = el.parentElement;
+
+    while (
+      parent &&
+      parent !== document.body &&
+      !parent.querySelector('video') &&
+      parent.offsetHeight <= 800
+    ) {
+      overlayContainer = parent;
+      parent = parent.parentElement;
+    }
+
+    collapseAdElement(overlayContainer);
+    collapseAdElement(el);
+
+    const video = document.querySelector('video');
+    if (video && video.paused && video.currentTime > 0) {
+      video.play().catch(() => {});
+    }
+  });
+}
+
 function sweepGamblingBanners(): void {
   const currentHost = window.location.hostname.toLowerCase();
-  const isMovieSite = currentHost.includes('animevietsub');
+  const isMovieContext =
+    currentHost.includes('animevietsub') || window.self !== window.top;
 
-  // Quét toàn bộ các thẻ <a> có chứa ảnh banner
+  removeInPlayerAdOverlay();
+
+  // 1. Quét toàn bộ các thẻ <a> chứa banner cờ bạc hoặc lớp phủ bẫy click trong suốt
   const links = document.querySelectorAll<HTMLAnchorElement>('a[href]');
   links.forEach((link) => {
     const href = (link.getAttribute('href') || '').toLowerCase();
@@ -76,41 +100,58 @@ function sweepGamblingBanners(): void {
     const imgAlt = (img?.getAttribute('alt') || '').toLowerCase();
     const combined = `${href} ${imgSrc} ${imgAlt}`;
 
-    // Dấu hiệu 1: Khớp trực tiếp tên nhà cái (VSbet, ViVU88, RikVIP, Nhất VIP, WIN79, SUN.WIN...)
-    const hasGamblingKeyword = GAMBLING_KEYWORDS.some((kw) => combined.includes(kw));
+    const hasGamblingKeyword = GAMBLING_KEYWORDS.some((kw) =>
+      combined.includes(kw)
+    );
 
-    // Dấu hiệu 2: Trên trang phim, mọi thẻ <a> mở tab mới (target="_blank" hoặc rel="nofollow")
-    // chứa ảnh động .gif hoặc trỏ ra domain ngoài (trừ Group FB/Youtube) đều là banner nhà cái
     const isExternalMovieBanner =
-      isMovieSite &&
-      img !== null &&
+      isMovieContext &&
       !isSafeSocialUrl(href) &&
-      (imgSrc.includes('.gif') ||
-        link.target === '_blank' ||
-        link.rel.includes('nofollow') ||
-        (href.startsWith('http') && !href.includes(currentHost)));
+      ((img !== null &&
+        (imgSrc.includes('.gif') ||
+          link.target === '_blank' ||
+          link.rel.includes('nofollow') ||
+          (href.startsWith('http') && !href.includes(currentHost)))) ||
+        (link.target === '_blank' &&
+          !href.includes(currentHost) &&
+          window.getComputedStyle(link).position === 'absolute'));
 
     if (hasGamblingKeyword || isExternalMovieBanner) {
+      link.removeAttribute('href');
+      link.removeAttribute('target');
       collapseAdElement(link);
       const wrapper = link.parentElement;
-      if (wrapper && wrapper.children.length <= 2 && wrapper.tagName !== 'BODY') {
+      if (
+        wrapper &&
+        wrapper.children.length <= 2 &&
+        wrapper.tagName !== 'BODY' &&
+        !wrapper.querySelector('video')
+      ) {
         collapseAdElement(wrapper);
       }
     }
   });
 
-  // Quét các thanh quảng cáo cờ bạc bám dính ở đáy màn hình (Catfish banner như WIN79 / SUN.WIN có nút X đỏ)
-  const fixedContainers = document.querySelectorAll<HTMLElement>('div, aside, section, footer');
-  fixedContainers.forEach((el) => {
+  // 2. Ẩn các khung quảng cáo bám đáy màn hình (Catfish) và nút [X] đỏ góc dưới bên phải
+  const floatingElements = document.querySelectorAll<HTMLElement>(
+    'div, aside, section, footer, span, a'
+  );
+  floatingElements.forEach((el) => {
     if (el.dataset.blockadsCleaned === '1') return;
     const style = window.getComputedStyle(el);
     if (style.position === 'fixed' || style.position === 'sticky') {
       const bottom = parseInt(style.bottom || '999', 10);
       const zIndex = parseInt(style.zIndex || '0', 10);
-      if (bottom <= 50 && zIndex >= 10 && el.offsetHeight > 25 && el.offsetHeight < 320) {
-        const hasAdContent =
-          el.querySelector('img[src*=".gif"], a[target="_blank"], a[rel*="nofollow"]') !== null;
-        if (hasAdContent) {
+      const text = (el.textContent || '').trim().toLowerCase();
+
+      if (bottom <= 60 && zIndex >= 10 && el.offsetHeight < 350) {
+        const isFakeCloseBtn = text === 'x' || text === '×' || text === 'đóng';
+        const hasAdMedia =
+          el.querySelector(
+            'img, iframe, a[target="_blank"], a[rel*="nofollow"]'
+          ) !== null;
+
+        if (isFakeCloseBtn || hasAdMedia) {
           collapseAdElement(el);
         }
       }
@@ -120,7 +161,9 @@ function sweepGamblingBanners(): void {
 
 function injectCosmeticCSS(cssText: string): void {
   if (!cssText) return;
-  let styleEl = document.getElementById(STYLE_ELEMENT_ID) as HTMLStyleElement | null;
+  let styleEl = document.getElementById(
+    STYLE_ELEMENT_ID
+  ) as HTMLStyleElement | null;
   if (!styleEl) {
     styleEl = document.createElement('style');
     styleEl.id = STYLE_ELEMENT_ID;
@@ -132,12 +175,13 @@ function injectCosmeticCSS(cssText: string): void {
 export default defineContentScript({
   matches: ['<all_urls>'],
   runAt: 'document_start',
+  allFrames: true,
   async main() {
     const cosmeticEngine = CosmeticEngine.getInstance();
     const elementPicker = ElementPicker.getInstance();
 
-    const hostname = normalizeDomain(window.location.hostname);
-    if (!hostname) return;
+    const rawHost = window.location.hostname || '';
+    const hostname = normalizeDomain(rawHost);
 
     // Miễn trừ YouTube vì có cơ chế player riêng
     if (hostname === 'youtube.com' || hostname.endsWith('.youtube.com')) {
@@ -145,13 +189,35 @@ export default defineContentScript({
     }
 
     const { whitelist } = await getStorageData();
-    const isWhitelisted = whitelist.some((w) => hostname === w || hostname.endsWith(`.${w}`));
-    if (isWhitelisted) return;
+    if (hostname) {
+      const isWhitelisted = whitelist.some(
+        (w) => hostname === w || hostname.endsWith(`.${w}`)
+      );
+      if (isWhitelisted) return;
+    }
 
-    injectAntiAdblockDefuser();
+    // Chặn toàn bộ sự kiện nhấn chuột (pointerdown, mousedown, click) vào nút "Đóng quảng cáo"
+    // ngay ở pha Capture trước khi trang web kịp nhảy sang link quảng cáo
+    const interceptAdButtonEvents = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      const text = (target.textContent || '').trim();
+      if (isAdCloseButtonText(text)) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        removeInPlayerAdOverlay();
+      }
+    };
 
-    const css = getCosmeticStylesheetForDomain(hostname, whitelist);
-    injectCosmeticCSS(css);
+    window.addEventListener('pointerdown', interceptAdButtonEvents, true);
+    window.addEventListener('mousedown', interceptAdButtonEvents, true);
+    window.addEventListener('click', interceptAdButtonEvents, true);
+
+    if (hostname) {
+      const css = getCosmeticStylesheetForDomain(hostname, whitelist);
+      injectCosmeticCSS(css);
+    }
 
     let rafId: number | null = null;
     const scheduleSweep = () => {
@@ -171,8 +237,9 @@ export default defineContentScript({
 
     const observer = new MutationObserver(scheduleSweep);
     const startObserver = () => {
-      if (document.body) {
-        observer.observe(document.body, { childList: true, subtree: true });
+      const root = document.body || document.documentElement;
+      if (root) {
+        observer.observe(root, { childList: true, subtree: true });
       }
     };
 

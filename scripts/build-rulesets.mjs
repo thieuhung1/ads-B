@@ -249,12 +249,75 @@ async function build() {
       priority: 20,
       action: { type: 'block' },
       condition: {
-        regexFilter: '.*(go88|sunwin|b52club|789club|hitclub|kubet|f8bet|shbet|hi88|new88|jun88|mb66|ok9|8xbet|188bet|w88|m88|fb88|fun88|vn88|dafabet|bk8|cmd368).*',
-        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest']
+        urlFilter: '*win79*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
       }
     },
     {
       id: 9006,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*sunwin*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9007,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*go88*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9008,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*kubet*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9009,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*f8bet*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9010,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*shbet*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9011,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*hi88*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9012,
+      priority: 20,
+      action: { type: 'block' },
+      condition: {
+        urlFilter: '*8xbet*',
+        resourceTypes: ['image', 'sub_frame', 'script', 'xmlhttprequest', 'media']
+      }
+    },
+    {
+      id: 9013,
       priority: 50,
       action: { type: 'allow' },
       condition: {
@@ -264,7 +327,7 @@ async function build() {
       }
     },
     {
-      id: 9007,
+      id: 9014,
       priority: 20,
       action: { type: 'block' },
       condition: {
@@ -273,7 +336,7 @@ async function build() {
       }
     },
     {
-      id: 9008,
+      id: 9015,
       priority: 20,
       action: { type: 'block' },
       condition: {
